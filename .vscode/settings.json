@@ -1,0 +1,8 @@
+{
+    "idf.adapterTargetName": "esp32",
+    "idf.portWin": "COM5",
+    "idf.flashType": "UART",
+    "files.associations": {
+        "hardware.h": "c"
+    }
+}
