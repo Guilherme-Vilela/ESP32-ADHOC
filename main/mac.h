@@ -10,7 +10,8 @@ typedef enum {
 } openmac_sta_state_t;
 
 
-#define time_transmit 1000000
+#define time_transmit 1000000 //
+#define time_out 20000000 // time for desconection
 #define pre_escale_probe_request 5 // 0 a 255 
 #define time_unit 1000 ///definida com 1u / time_unit
 void open_mac_rx_callback(wifi_promiscuous_pkt_t* packet);

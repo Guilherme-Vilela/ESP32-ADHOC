@@ -97,7 +97,7 @@ current_connections *create_list_current_connections()
 current_connections *insert_current_connections(current_connections *head, uint8_t mac[6], uint8_t state)
 {
     current_connections *new_conection = malloc(sizeof(current_connections));
-    current_connections *aux = head;
+    current_connections *item = head;
 
 
     memcpy(new_conection->mac_adress, mac, 6);
@@ -110,11 +110,11 @@ current_connections *insert_current_connections(current_connections *head, uint8
         return new_conection;
     }
     
-    while (aux->next != NULL)
+    while (item->next != NULL)
     {
-        aux = aux->next;
+        item = item->next;
     }
-    aux->next = new_conection;
+    item->next = new_conection;
 
     return head;
 }
@@ -125,24 +125,46 @@ void update_conection(current_connections *conection, uint8_t state)
 }
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
-    current_connections *aux = head;
-    while(aux != NULL && memcmp(aux->mac_adress, mac, 6)){
-		aux= aux->next;	
+    current_connections *item = head;
+    while(item != NULL && memcmp(item->mac_adress, mac, 6)){
+		item= item->next;	
 	}
-	return aux;
+	return item;
 
+}
+
+current_connections *remove_conection(current_connections **head, current_connections **connection_removed)
+{
+    current_connections *item = *head;
+    current_connections *previous_item = NULL;
+
+    while(item != NULL && item != *connection_removed){
+		previous_item =item;
+		item= item->next;	
+	}
+
+	if(item != NULL){   
+		if(previous_item == NULL ){
+			*head = item->next;
+            previous_item =  item->next;
+		}else{ 
+			previous_item->next = item->next;	
+		}
+		free(item);
+	}
+    return previous_item;
 }
 
 int search_mac(current_connections *head, uint8_t mac[6])
 {
-    current_connections *aux = head;
-    if (aux != NULL)
+    current_connections *item = head;
+    if (item != NULL)
     {
-        while (memcmp(aux->mac_adress, mac, 6) && aux != NULL)
+        while (memcmp(item->mac_adress, mac, 6) && item != NULL)
         {
-            aux = aux->next;
+            item = item->next;
         }
-        if (aux != NULL)
+        if (item != NULL)
         {
             return true;
         }
@@ -344,6 +366,7 @@ void mac_task(void *pvParameters)
                         break;
                     case CONNECTED:
                         ESP_LOGI(TAG, "Conectado");
+                        update_conection(connection, CONNECTED);
 
                     default:
                         break;
@@ -418,7 +441,15 @@ void mac_task(void *pvParameters)
             default:
                 break;
             }
-            connection = connection->next;
+
+            
+            if (esp_timer_get_time() - connection->last_communication_time > time_out){
+                connection =remove_conection(&list_connections,&connection);
+            }
+            if(connection != NULL){
+                connection = connection->next;
+            }
+            
         }
         last_transmission_us = esp_timer_get_time();
     }
