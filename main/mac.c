@@ -16,15 +16,6 @@ static char *TAG = "mac.c";
 static tx_func *tx = NULL;
 static QueueHandle_t reception_queue = NULL;
 
-typedef struct openmac_netif_driver *openmac_netif_driver_t;
-
-typedef struct openmac_netif_driver
-{
-    esp_netif_driver_base_t base;
-} *openmac_netif_driver_t;
-
-static bool receive_task_is_running = true;
-static esp_netif_t *netif_openmac = NULL;
 
 static const char *ssid = "meshtest";
 uint8_t ap_address[6];
@@ -39,6 +30,9 @@ typedef struct current_connections
 
 current_connections *list_connections =NULL;
 
+
+uint8_t supported_rates[] = {0x01, 0x08, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}; // Supported rates}
+
 uint8_t to_ap_auth_frame[] = {
     0xb0, 0x00,
     0x00, 0x00,
@@ -50,7 +44,7 @@ uint8_t to_ap_auth_frame[] = {
     0, 0, 0, 0 /*FCS*/};
 
 uint8_t to_ap_assoc_frame_template[] = {
-    0x10, 0x00,
+    IEEE80211_ASSOCIATION_RESP, 0x00,
     0x00, 0x00,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
@@ -62,7 +56,7 @@ uint8_t to_ap_assoc_frame_template[] = {
     // 4 bytes FCS
 };
 
-uint8_t supported_rates[] = {0x01, 0x08, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}; // Supported rates}
+
 
 uint8_t to_ap_assoc_frame[sizeof(to_ap_assoc_frame_template) + 34 /*2 bytes + 32 byte SSID*/ + sizeof(supported_rates) + 4] = {0};
 size_t to_ap_assoc_frame_size = 0;
@@ -88,6 +82,18 @@ uint8_t data_frame_probe_request[] = {
     0x00, 0x00,                         // sequence control
     0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0, 0, 0, 0 /*FCS*/
+};
+uint8_t data_frame[] = {
+    0x0, 0x00,   //
+    0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
+    0x00, 0x00,                         // sequence control
+    0x11, 0x00, 0x0a, 0x00,             // Fixed parameters
+    // SSID
+    // supported rates
+    // 4 bytes FCS
 };
 
 current_connections *create_list_current_connections()
@@ -371,6 +377,8 @@ void mac_task(void *pvParameters)
                     default:
                         break;
                     }
+                }else if(p->frame_control.type == IEEE80211_TYPE_DATA){
+                    update_conection(connection, CONNECTED);
                 }
                 free(packet);
             }
@@ -403,10 +411,10 @@ void mac_task(void *pvParameters)
             {
             case PROBE_RESPONSE:
                 ESP_LOGI(TAG, "Sending PROBE RESPONSE");
-                data_frame_probe_request[0] = 0x50;
+                data_frame_probe_request[0] = IEEE80211_PROBE_RESPONSE;
                 set_address_receiver(data_frame_probe_request, connection->mac_adress);
                 tx(data_frame_probe_request, sizeof(data_frame_probe_request));
-                data_frame_probe_request[0] = 0x40;
+                data_frame_probe_request[0] = IEEE80211_PROBE_REQUEST;
                 break;
             case AUTHENTICATION_REQUEST:
                 ESP_LOGI(TAG, "Sending authentication Request!");
@@ -420,23 +428,23 @@ void mac_task(void *pvParameters)
                 break;
             case ASSOCIATION_REQUEST:
                 ESP_LOGI(TAG, "Sending association request frame!");
-                to_ap_assoc_frame[0] = 0x00;
+                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
                 set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
                 tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
                 break;
             case ASSOCIATION_RESPONSE:
                 ESP_LOGI(TAG, "Sending association response frame!");
-                to_ap_assoc_frame[0] = 0x10;
+                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_RESP;
                 set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
                 tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
-                to_ap_assoc_frame[0] = 0x00;
+                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
                 break;
             case CONNECTED:
                 ESP_LOGI(TAG, "ACK");
-                to_ap_assoc_frame[0] = 0xd0;
+                to_ap_assoc_frame[0] = IEEE80211_ACK;
                 set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
                 tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
-                to_ap_assoc_frame[0] = 0x00;
+                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
                 break;
             default:
                 break;
@@ -454,107 +462,3 @@ void mac_task(void *pvParameters)
         last_transmission_us = esp_timer_get_time();
     }
 }
-
-// static esp_err_t openmac_netif_transmit(void *h, void *buffer, size_t len)
-// {
-//     uint8_t* eth_data = (uint8_t*) buffer;
-//     ESP_LOGI("netif-tx", "Going to transmit a packet: to "MACSTR" from "MACSTR" type=%02x%02x", MAC2STR(&eth_data[0]), MAC2STR(&eth_data[6]), eth_data[12], eth_data[13]);
-//     ESP_LOG_BUFFER_HEXDUMP("netif-tx", eth_data, len, ESP_LOG_INFO);
-//     // We need to transform this Ethernet packet to a packet that can be sent via 802.11 data frame
-//     // Luckily for us; that's pretty do-able
-//     size_t wifi_packet_size = sizeof(data_frame_template) - (6+6+2/*ethernet header*/) + len + 4 /*FCS*/;
-//     uint8_t* wifi_data_frame = malloc(wifi_packet_size);
-
-//     // Copy over wifi data frame template
-//     memcpy(wifi_data_frame, data_frame_template, sizeof(data_frame_template));
-//     // Set destination MAC address
-//     memcpy(wifi_data_frame + (4+2*6), eth_data, 6);
-//     // Set transmitter MAC address
-//     memcpy(wifi_data_frame + (4 + 6), eth_data + 6, 6);
-//     // Set type
-//     memcpy(wifi_data_frame + (sizeof(data_frame_template) - 2), eth_data + (2*6), 2);
-//     // Set data
-//     memcpy(wifi_data_frame + sizeof(data_frame_template), eth_data + (2*6+2), len - (2*6+2));
-//     // Set FCS to 0
-//     memset(wifi_data_frame + wifi_packet_size - 4, 0, 4);
-
-//     if (!tx) {
-//         return ESP_FAIL;
-//     }
-//     // TODO check that we have TX slots before transmitting
-//     // ESP_LOGI("netif-tx", "transformed packet");
-//     // ESP_LOG_BUFFER_HEXDUMP("netif-tx", wifi_data_frame, wifi_packet_size, ESP_LOG_INFO);
-
-//     //tx(wifi_data_frame, wifi_packet_size);
-//     free(wifi_data_frame);
-
-//     return ESP_OK;
-// }
-// static esp_err_t openmac_netif_transmit_wrap(void *h, void *buffer, size_t len, void *netstack_buf)
-// {
-//     return openmac_netif_transmit(h, buffer, len);
-// }
-
-// // Free RX buffer (not used as the buffer is static)
-// // TODO ^ is this true?
-// static void openmac_free(void *h, void* buffer)
-// {
-//     ESP_LOGI(TAG, "Free-ing RX'd packet %p", buffer);
-//     free(buffer);
-// }
-
-// static esp_err_t openmac_driver_start(esp_netif_t * esp_netif, void * args)
-// {
-//     openmac_netif_driver_t driver = args;
-//     driver->base.netif = esp_netif;
-//     esp_netif_driver_ifconfig_t driver_ifconfig = {
-//             .handle =  driver,
-//             .transmit = openmac_netif_transmit,
-//             .transmit_wrap = openmac_netif_transmit_wrap,
-//             .driver_free_rx_buffer = openmac_free
-//     };
-
-//     return esp_netif_set_driver_config(esp_netif, &driver_ifconfig);
-// }
-
-// openmac_netif_driver_t openmac_create_if_driver()
-// {
-//     openmac_netif_driver_t driver = calloc(1, sizeof(struct openmac_netif_driver));
-//     if (driver == NULL) {
-//         ESP_LOGE(TAG, "No memory to create a wifi interface handle");
-//         return NULL;
-//     }
-//     driver->base.post_attach = openmac_driver_start;
-
-//     // TODO fix this
-//     if (!receive_task_is_running) {
-//         receive_task_is_running = true;
-//     }
-//     return driver;
-// }
-
-// esp_err_t openmac_netif_start()
-// {
-//     esp_netif_inherent_config_t base_cfg = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
-//     base_cfg.if_desc = "openmac";
-//     // base_cfg.get_ip_event = NULL;
-//     // base_cfg.lost_ip_event = NULL;
-
-//     esp_netif_config_t cfg = {
-//             .base = &base_cfg,
-//             .driver = NULL,
-//             .stack = ESP_NETIF_NETSTACK_DEFAULT_WIFI_STA };
-//     netif_openmac = esp_netif_new(&cfg);
-//     assert(netif_openmac);
-
-//     openmac_netif_driver_t driver = openmac_create_if_driver();
-//     if (driver == NULL) {
-//         ESP_LOGE(TAG, "Failed to create wifi interface handle");
-//         return ESP_FAIL;
-//     }
-//     esp_netif_attach(netif_openmac, driver);
-//     esp_netif_set_hostname(netif_openmac, "esp32-open-mac");
-//     esp_netif_set_mac(netif_openmac, module_mac_addr);
-//     esp_netif_action_start(netif_openmac, NULL, 0, NULL);
-//     return ESP_OK;
-// }

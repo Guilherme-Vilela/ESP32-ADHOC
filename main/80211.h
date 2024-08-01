@@ -30,6 +30,17 @@
  *  15/10/2023 redfast00: modified for ESP32 wifi implementation
  */
 
+
+/*         -------------------       Frame Control format ----------------
+protocol version   -    Type           -      Subtype    -    To DS  - From DS - More Fragments  - More Fragments - Retry - Power Management 
+  2 bits                  2bits         -      4bits     -    1bit  -  1bit   -     1bit        -     1 bit      -  1bit -  1bit
+
+|              first byte                                 |       second byte                                                                |
+
+
+
+
+*/
 #define QEMU_PACKED __attribute__((packed))
 
 
@@ -46,6 +57,23 @@
 #define IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_REQ  0x00
 #define IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_RESP 0x01
 #define IEEE80211_TYPE_MGT_SUBTYPE_DISASSOCIATION   0x0a
+
+#define IEEE80211_TYPE_DATA_SUBTYPE_DATA 0x00
+#define IEEE80211_TYPE_DATA_SUBTYPE_NO_DATA 0x04
+#define IEEE80211_TYPE_DATA_SUBTYPE_DATA_QOS 0x08
+#define IEEE80211_TYPE_DATA_SUBTYPE_QOS 0x0c
+
+
+
+#define IEEE80211_PROBE_REQUEST     0x40
+#define IEEE80211_PROBE_RESPONSE    0x50
+#define IEEE80211_ASSOCIATION_REQ   0x00
+#define IEEE80211_ASSOCIATION_RESP  0x10
+#define IEEE80211_ACK               0xd0
+
+#define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+#define IEEE80211_RECIVER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+
 
 #define IEEE80211_TYPE_CTL_SUBTYPE_ACK          0x0d
 

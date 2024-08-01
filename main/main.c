@@ -25,18 +25,18 @@ hardware_mac_args open_hw_args = {
 	._tx_func_callback = open_mac_tx_func_callback
 };
 
-void print_mac(uint8_t * mac){
-    int i;
-    printf("\n\n\n\n MAC é ");
-    for(i=0;i<6;i++){
-        printf("%x", mac[i]);
-    }
-    printf("\n");
-}  
+// void print_mac(uint8_t * mac){
+//     int i;
+//     printf("\n\n\n\n MAC é ");
+//     for(i=0;i<6;i++){
+//         printf("%x", mac[i]);
+//     }
+//     printf("\n");
+// }  
 void get_mac(){
 	esp_err_t ret = ESP_OK;
 	ret = esp_read_mac(module_mac_addr, ESP_MAC_WIFI_STA);
-	print_mac(module_mac_addr);
+	//print_mac(module_mac_addr);
 }
 
 void app_main(void) {
@@ -46,11 +46,9 @@ void app_main(void) {
 		ESP_LOGE("main", "get_phy_version_str() wrong: is '%s' but should be '%s'", actual_version_string, expected_version_string);
 		abort();
 	}
-	//nvs_flash_init();
+
 	get_mac();
-	//esp_netif_init();
+
 	xTaskCreatePinnedToCore(&mac_task,           "open_mac",      4096, NULL,          /*prio*/ 3, NULL, /*core*/ 1);
 	xTaskCreatePinnedToCore(&wifi_hardware_task, "wifi_hardware", 4096, &open_hw_args, /*prio*/ 5, NULL, /*core*/ 0);
-	
-	//openmac_netif_start();
 }
