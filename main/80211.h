@@ -63,6 +63,8 @@ protocol version   -    Type           -      Subtype    -    To DS  - From DS -
 #define IEEE80211_TYPE_DATA_SUBTYPE_DATA_QOS 0x08
 #define IEEE80211_TYPE_DATA_SUBTYPE_QOS 0x0c
 
+#define IEEE80211_TYPE_CTL_SUBTYPE_ACK          0x0d
+#define IEEE80211_TYPE_DATA_SUBTYPE_DATA        0x00
 
 
 #define IEEE80211_PROBE_REQUEST     0x40
@@ -71,13 +73,18 @@ protocol version   -    Type           -      Subtype    -    To DS  - From DS -
 #define IEEE80211_ASSOCIATION_RESP  0x10
 #define IEEE80211_ACK               0xd0
 
-#define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-#define IEEE80211_RECIVER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+
+#define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+#define IEEE80211_RECIVER_ADDR      0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+#define IEEE80211_BSSID             0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#define IEEE80211_FRAME_CONTROL     0x00, 0x00
+#define IEEE80211_FRAME_CONTROL     0x00, 0x00
+#define IEEE80211_DURATION_ID       0x00, 0x00
+#define IEEE80211_SEQUENCE_CONTROL  0x00, 0x00
+#define IEEE80211_QOS_CONTROL       0x00, 0x00
 
 
-#define IEEE80211_TYPE_CTL_SUBTYPE_ACK          0x0d
 
-#define IEEE80211_TYPE_DATA_SUBTYPE_DATA        0x00
 
 typedef uint8_t macaddr_t[6];
 

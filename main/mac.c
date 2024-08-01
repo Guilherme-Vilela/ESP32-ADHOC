@@ -33,6 +33,15 @@ current_connections *list_connections =NULL;
 
 uint8_t supported_rates[] = {0x01, 0x08, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}; // Supported rates}
 
+uint8_t mac_frame_header_template[] = {
+    IEEE80211_FRAME_CONTROL, 
+    IEEE80211_DURATION_ID,
+    IEEE80211_RECIVER_ADDR,
+    IEEE80211_TRANSMITTER_ADDR,
+    IEEE80211_BSSID,
+    IEEE80211_SEQUENCE_CONTROL,
+};
+
 uint8_t to_ap_auth_frame[] = {
     0xb0, 0x00,
     0x00, 0x00,
@@ -40,8 +49,7 @@ uint8_t to_ap_auth_frame[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
     0x00, 0x00,                         // sequence control
-    0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0, 0, 0, 0 /*FCS*/};
+};
 
 uint8_t to_ap_assoc_frame_template[] = {
     IEEE80211_ASSOCIATION_RESP, 0x00,
@@ -50,10 +58,6 @@ uint8_t to_ap_assoc_frame_template[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
     0x00, 0x00,                         // sequence control
-    0x11, 0x00, 0x0a, 0x00,             // Fixed parameters
-    // SSID
-    // supported rates
-    // 4 bytes FCS
 };
 
 
@@ -68,9 +72,6 @@ uint8_t data_frame_template[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
     0x00, 0x00,                         // sequence control
-    0xaa, 0xaa,                         // SNAP
-    0x03, 0x00, 0x00, 0x00,             // other LLC headers
-    0xAA, 0xBB                          // type (AA BB because this needs to be overwritten)
 };
 
 uint8_t data_frame_probe_request[] = {
@@ -80,21 +81,8 @@ uint8_t data_frame_probe_request[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bssid
     0x00, 0x00,                         // sequence control
-    0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0, 0, 0, 0 /*FCS*/
 };
-uint8_t data_frame[] = {
-    0x0, 0x00,   //
-    0x00, 0x00,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
-    0x00, 0x00,                         // sequence control
-    0x11, 0x00, 0x0a, 0x00,             // Fixed parameters
-    // SSID
-    // supported rates
-    // 4 bytes FCS
-};
+
 
 current_connections *create_list_current_connections()
 {
@@ -342,6 +330,10 @@ void mac_task(void *pvParameters)
                             ESP_LOGW(TAG, "Authentication response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, ASSOCIATION_REQUEST);
                             //last_transmission_us = 0;
+                        }
+                        
+                        else if(p->frame_control.sub_type == AUTHENTICATION_REQUEST){
+                            connection =remove_conection(&list_connections,&connection);
                         }
                         break;
                     case AUTHENTICATION_RESPONSE: // authenticated, wait for association response packet
