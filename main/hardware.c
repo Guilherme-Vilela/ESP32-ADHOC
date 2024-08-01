@@ -278,10 +278,10 @@ void setup_rx_chain() {
 		dma_list_item* item = malloc(sizeof(dma_list_item));
 		item->has_data = 0;
 		item->owner = 1;
-		item->size = 1600;
+		item->size = MAX_SIZE_PAYLOAD;
 		item->length = item->size;
 
-		uint8_t* packet = malloc(1600); // TODO verify that this does not need to be bigger
+		uint8_t* packet = malloc(MAX_SIZE_PAYLOAD); // TODO verify that this does not need to be bigger
 		item->packet = packet;
 		item->next = prev;
 		prev = item;

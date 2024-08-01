@@ -16,7 +16,6 @@ static char *TAG = "mac.c";
 static tx_func *tx = NULL;
 static QueueHandle_t reception_queue = NULL;
 
-
 static const char *ssid = "meshtest";
 uint8_t ap_address[6];
 
@@ -28,13 +27,12 @@ typedef struct current_connections
     struct current_connections *next;
 } current_connections;
 
-current_connections *list_connections =NULL;
-
+current_connections *list_connections = NULL;
 
 uint8_t supported_rates[] = {0x01, 0x08, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}; // Supported rates}
 
 uint8_t mac_frame_header_template[] = {
-    IEEE80211_FRAME_CONTROL, 
+    IEEE80211_FRAME_CONTROL,
     IEEE80211_DURATION_ID,
     IEEE80211_RECIVER_ADDR,
     IEEE80211_TRANSMITTER_ADDR,
@@ -60,8 +58,6 @@ uint8_t to_ap_assoc_frame_template[] = {
     0x00, 0x00,                         // sequence control
 };
 
-
-
 uint8_t to_ap_assoc_frame[sizeof(to_ap_assoc_frame_template) + 34 /*2 bytes + 32 byte SSID*/ + sizeof(supported_rates) + 4] = {0};
 size_t to_ap_assoc_frame_size = 0;
 
@@ -83,7 +79,6 @@ uint8_t data_frame_probe_request[] = {
     0x00, 0x00,                         // sequence control
 };
 
-
 current_connections *create_list_current_connections()
 {
     return NULL;
@@ -92,7 +87,6 @@ current_connections *insert_current_connections(current_connections *head, uint8
 {
     current_connections *new_conection = malloc(sizeof(current_connections));
     current_connections *item = head;
-
 
     memcpy(new_conection->mac_adress, mac, 6);
     new_conection->status = state;
@@ -103,7 +97,7 @@ current_connections *insert_current_connections(current_connections *head, uint8
     {
         return new_conection;
     }
-    
+
     while (item->next != NULL)
     {
         item = item->next;
@@ -120,11 +114,11 @@ void update_conection(current_connections *conection, uint8_t state)
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
     current_connections *item = head;
-    while(item != NULL && memcmp(item->mac_adress, mac, 6)){
-		item= item->next;	
-	}
-	return item;
-
+    while (item != NULL && memcmp(item->mac_adress, mac, 6))
+    {
+        item = item->next;
+    }
+    return item;
 }
 
 current_connections *remove_conection(current_connections **head, current_connections **connection_removed)
@@ -132,20 +126,25 @@ current_connections *remove_conection(current_connections **head, current_connec
     current_connections *item = *head;
     current_connections *previous_item = NULL;
 
-    while(item != NULL && item != *connection_removed){
-		previous_item =item;
-		item= item->next;	
-	}
+    while (item != NULL && item != *connection_removed)
+    {
+        previous_item = item;
+        item = item->next;
+    }
 
-	if(item != NULL){   
-		if(previous_item == NULL ){
-			*head = item->next;
-            previous_item =  item->next;
-		}else{ 
-			previous_item->next = item->next;	
-		}
-		free(item);
-	}
+    if (item != NULL)
+    {
+        if (previous_item == NULL)
+        {
+            *head = item->next;
+            previous_item = item->next;
+        }
+        else
+        {
+            previous_item->next = item->next;
+        }
+        free(item);
+    }
     return previous_item;
 }
 
@@ -225,11 +224,11 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
 {
     mac80211_frame *p = (mac80211_frame *)packet->payload;
     uint8_t mac_listen_probe_request[6] = MAC_PROBE_REQUEST;
-    current_connections *connection_aux= NULL;
+    current_connections *connection_aux = NULL;
 
-    //ESP_LOGI(TAG, "Tipo   = %x \n", p->frame_control.type);
-    //ESP_LOGI(TAG, "Subtipo= %x \n", p->frame_control.sub_type);
-    // check that receiver mac address matches our mac address or is broadcast
+    // ESP_LOGI(TAG, "Tipo   = %x \n", p->frame_control.type);
+    // ESP_LOGI(TAG, "Subtipo= %x \n", p->frame_control.sub_type);
+    //  check that receiver mac address matches our mac address or is broadcast
     if ((memcmp(module_mac_addr, p->receiver_address, 6)) && (memcmp(mac_listen_probe_request, p->receiver_address, 6)))
     { //&& (memcmp(BROADCAST_MAC, p->receiver_address, 6))
         // We're not interested in this packet, return early to avoid having to copy it further to the networking stack
@@ -259,7 +258,7 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
         }
     }
 
-    //ESP_LOGI(TAG, "Accepted: from " MACSTR " to " MACSTR " type=%d, subtype=%d from_ds=%d to_ds=%d", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address), p->frame_control.type, p->frame_control.sub_type, p->frame_control.from_ds, p->frame_control.to_ds);
+    // ESP_LOGI(TAG, "Accepted: from " MACSTR " to " MACSTR " type=%d, subtype=%d from_ds=%d to_ds=%d", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address), p->frame_control.type, p->frame_control.sub_type, p->frame_control.from_ds, p->frame_control.to_ds);
 
     if (!reception_queue)
     {
@@ -321,7 +320,7 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, AUTHENTICATION_RESPONSE);
-                            //last_transmission_us = 0;
+                            // last_transmission_us = 0;
                         }
                         break;
                     case AUTHENTICATION_REQUEST: // WAIT PACK AUTH RESPONSE
@@ -329,11 +328,12 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Authentication response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, ASSOCIATION_REQUEST);
-                            //last_transmission_us = 0;
+                            // last_transmission_us = 0;
                         }
-                        
-                        else if(p->frame_control.sub_type == AUTHENTICATION_REQUEST){
-                            connection =remove_conection(&list_connections,&connection);
+
+                        else if (p->frame_control.sub_type == AUTHENTICATION_REQUEST)
+                        {
+                            connection = remove_conection(&list_connections, &connection);
                         }
                         break;
                     case AUTHENTICATION_RESPONSE: // authenticated, wait for association response packet
@@ -341,7 +341,7 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Association request received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, ASSOCIATION_RESPONSE);
-                            //last_transmission_us = 0;
+                            // last_transmission_us = 0;
                         }
                         break;
                     case ASSOCIATION_REQUEST: // associated
@@ -350,7 +350,7 @@ void mac_task(void *pvParameters)
                             ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             ESP_LOGW("assoc-data", "Received data frame, will handle");
                             update_conection(connection, CONNECTED);
-                            //last_transmission_us = 0;
+                            // last_transmission_us = 0;
                         }
                         break;
                     case ASSOCIATION_RESPONSE: //
@@ -359,7 +359,7 @@ void mac_task(void *pvParameters)
                             ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             ESP_LOGW("assoc-data", "Received data frame, will handle");
                             update_conection(connection, CONNECTED);
-                            //last_transmission_us = 0;
+                            // last_transmission_us = 0;
                         }
                         break;
                     case CONNECTED:
@@ -369,8 +369,16 @@ void mac_task(void *pvParameters)
                     default:
                         break;
                     }
-                }else if(p->frame_control.type == IEEE80211_TYPE_DATA){
-                    update_conection(connection, CONNECTED);
+                }
+                else if (p->frame_control.type == IEEE80211_TYPE_DATA)
+                {
+                    if(connection->status == CONNECTED){
+                        update_conection(connection, CONNECTED);
+
+
+                        
+                    }
+                    
                 }
                 free(packet);
             }
@@ -442,14 +450,14 @@ void mac_task(void *pvParameters)
                 break;
             }
 
-            
-            if (esp_timer_get_time() - connection->last_communication_time > time_out){
-                connection =remove_conection(&list_connections,&connection);
+            if (esp_timer_get_time() - connection->last_communication_time > time_out)
+            {
+                connection = remove_conection(&list_connections, &connection);
             }
-            if(connection != NULL){
+            if (connection != NULL)
+            {
                 connection = connection->next;
             }
-            
         }
         last_transmission_us = esp_timer_get_time();
     }
