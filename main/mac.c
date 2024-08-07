@@ -16,8 +16,8 @@ static char *TAG = "mac.c";
 static tx_func *tx = NULL;
 static QueueHandle_t reception_queue = NULL;
 
-static const char *ssid = "meshtest";
-uint8_t ap_address[6];
+macaddr_t ssid = {'w', 'i', 'f', 'd', 't', 'n'};
+macaddr_t ap_address = {0, 0, 0, 0, 0, 0};
 
 typedef struct current_connections
 {
@@ -29,8 +29,6 @@ typedef struct current_connections
 
 current_connections *list_connections = NULL;
 
-uint8_t supported_rates[] = {0x01, 0x08, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c}; // Supported rates}
-
 uint8_t mac_frame_header_template[] = {
     IEEE80211_FRAME_CONTROL,
     IEEE80211_DURATION_ID,
@@ -40,49 +38,11 @@ uint8_t mac_frame_header_template[] = {
     IEEE80211_SEQUENCE_CONTROL,
 };
 
-uint8_t to_ap_auth_frame[] = {
-    0xb0, 0x00,
-    0x00, 0x00,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
-    0x00, 0x00,                         // sequence control
-};
-
-uint8_t to_ap_assoc_frame_template[] = {
-    IEEE80211_ASSOCIATION_RESP, 0x00,
-    0x00, 0x00,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
-    0x00, 0x00,                         // sequence control
-};
-
-uint8_t to_ap_assoc_frame[sizeof(to_ap_assoc_frame_template) + 34 /*2 bytes + 32 byte SSID*/ + sizeof(supported_rates) + 4] = {0};
-size_t to_ap_assoc_frame_size = 0;
-
-uint8_t data_frame_template[] = {
-    0x08, 0x00,                         // frame control
-    0x00, 0x00,                         // duration/ID
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // receiver addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // bssid
-    0x00, 0x00,                         // sequence control
-};
-
-uint8_t data_frame_probe_request[] = {
-    0x40, 0x00,
-    0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // receiver addr
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // transmitter addr
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bssid
-    0x00, 0x00,                         // sequence control
-};
-
 current_connections *create_list_current_connections()
 {
     return NULL;
 }
+
 current_connections *insert_current_connections(current_connections *head, uint8_t mac[6], uint8_t state)
 {
     current_connections *new_conection = malloc(sizeof(current_connections));
@@ -106,11 +66,13 @@ current_connections *insert_current_connections(current_connections *head, uint8
 
     return head;
 }
+
 void update_conection(current_connections *conection, uint8_t state)
 {
     conection->status = state;
     conection->last_communication_time = esp_timer_get_time() / time_unit;
 }
+
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
     current_connections *item = head;
@@ -125,7 +87,7 @@ current_connections *remove_conection(current_connections **head, current_connec
 {
     current_connections *item = *head;
     current_connections *previous_item = NULL;
-
+    ESP_LOGD(TAG, "APAGANDO A CONEXÃO");
     while (item != NULL && item != *connection_removed)
     {
         previous_item = item;
@@ -164,8 +126,7 @@ int search_mac(current_connections *head, uint8_t mac[6])
     }
     return false;
 }
-
-void set_addresses(uint8_t *frame, const uint8_t *ra, const uint8_t *ta, const uint8_t *bssid)
+void build_frame(uint8_t *frame, uint8_t *ra, uint8_t *ta, uint8_t *bssid)
 {
     // set receiver address
     memcpy(&frame[4], ra, 6);
@@ -174,44 +135,14 @@ void set_addresses(uint8_t *frame, const uint8_t *ra, const uint8_t *ta, const u
     // set bssid
     memcpy(&frame[16], bssid, 6);
 }
-void set_address_receiver(uint8_t *frame, const uint8_t *ra)
+
+void set_addresses(uint8_t *frame, uint8_t first_byte_frame_control, uint8_t *ra)
 {
+    // set first_byte frame control
+    frame[0] = first_byte_frame_control;
+
     // set receiver address
     memcpy(&frame[4], ra, 6);
-}
-void set_address_transmitter(uint8_t *frame, const uint8_t *ta)
-{
-    // set transmitter address
-    memcpy(&frame[10], ta, 6);
-}
-
-void build_frames()
-{
-
-    set_addresses(to_ap_auth_frame, ap_address, module_mac_addr, ap_address);
-    set_address_transmitter(data_frame_probe_request, module_mac_addr);
-
-    memcpy(to_ap_assoc_frame, to_ap_assoc_frame_template, sizeof(to_ap_assoc_frame_template));
-    // set SSID
-    size_t idx = sizeof(to_ap_assoc_frame_template);
-
-    to_ap_assoc_frame[idx++] = 0x00; // SSID
-    size_t ssid_len = strlen(ssid);
-    if (ssid_len > 32)
-    {
-        ESP_LOGE(TAG, "Length of SSID %d>32", (int)ssid_len);
-        ssid_len = 32;
-    }
-    to_ap_assoc_frame[idx++] = ssid_len & 0xff;
-    memcpy(&to_ap_assoc_frame[idx], ssid, ssid_len);
-    idx += ssid_len;
-    memcpy(&to_ap_assoc_frame[idx], supported_rates, sizeof(supported_rates));
-    idx += sizeof(supported_rates);
-    idx += 4; // FCS, value does not matter
-    to_ap_assoc_frame_size = idx;
-
-    set_addresses(to_ap_assoc_frame, ap_address, module_mac_addr, ap_address);
-    set_addresses(data_frame_template, ap_address, module_mac_addr, ap_address);
 }
 
 // Gets called with a packet that was received. This function does not need to free the memory of the packet,
@@ -225,9 +156,22 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
     mac80211_frame *p = (mac80211_frame *)packet->payload;
     uint8_t mac_listen_probe_request[6] = MAC_PROBE_REQUEST;
     current_connections *connection_aux = NULL;
+    printf("\n DADO RECEBIDO :");
+    for (int contador = 0; contador < 24; contador++)
+    {
+        printf(" %x ", packet->payload[contador]);
+    }
+    printf("\n\n");
+    if (packet->payload[0] < 16)
+    {
+        uint8_t valor = packet->payload[0];
+        p->frame_control.sub_type = valor;
+        p->frame_control.type = 0;
+        p->frame_control.protocol_version = 0;
+    }
 
-    // ESP_LOGI(TAG, "Tipo   = %x \n", p->frame_control.type);
-    // ESP_LOGI(TAG, "Subtipo= %x \n", p->frame_control.sub_type);
+    printf("Tipo   = %x \n", p->frame_control.type);
+    printf("Subtipo= %x \n", p->frame_control.sub_type);
     //  check that receiver mac address matches our mac address or is broadcast
     if ((memcmp(module_mac_addr, p->receiver_address, 6)) && (memcmp(mac_listen_probe_request, p->receiver_address, 6)))
     { //&& (memcmp(BROADCAST_MAC, p->receiver_address, 6))
@@ -282,6 +226,16 @@ void open_mac_tx_func_callback(tx_func *t)
     tx = t;
 }
 
+void send_mensage()
+{
+    // char8_t mac_frame_data[1500];
+
+    // busca a mensagem
+    // trata a mensagem
+    // manda mensagem
+    //
+}
+
 void mac_task(void *pvParameters)
 {
     uint8_t temp_probe_request = 0;
@@ -289,9 +243,9 @@ void mac_task(void *pvParameters)
     list_connections = create_list_current_connections();
     current_connections *connection = NULL;
 
+    build_frame(mac_frame_header_template, ap_address, module_mac_addr, ssid);
+
     ESP_LOGI(TAG, "Starting mac_task, running on %d", xPortGetCoreID());
-    build_frames();
-    ESP_LOGI(TAG, "Built frames, with SSID %s and AP address: %#02x:%#02x:%#02x:%#02x:%#02x:%#02x", ssid, ap_address[0], ap_address[1], ap_address[2], ap_address[3], ap_address[4], ap_address[5]);
 
     reception_queue = xQueueCreate(10, sizeof(wifi_promiscuous_pkt_t *));
     assert(reception_queue);
@@ -302,8 +256,17 @@ void mac_task(void *pvParameters)
         if (xQueueReceive(reception_queue, &packet, 10))
         {
             mac80211_frame *p = (mac80211_frame *)packet->payload;
+            if (packet->payload[0] < 16)
+            {
+                uint8_t valor = packet->payload[0];
+                p->frame_control.sub_type = valor;
+                p->frame_control.type = 0;
+                p->frame_control.protocol_version = 0;
+            }
+            // ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11  ", packet->payload, packet->rx_ctrl.sig_len - 4, ESP_LOG_INFO);
 
-            ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11", packet->payload, packet->rx_ctrl.sig_len - 4, ESP_LOG_INFO);
+            // ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
+            //  ESP_LOGW(TAG, "SUBTIPO : %x", p->frame_control.sub_type);
             memcpy(ap_address, p->transmitter_address, 6);
 
             connection = search_conection(list_connections, p->transmitter_address);
@@ -314,13 +277,11 @@ void mac_task(void *pvParameters)
                 {
                     switch (connection->status)
                     {
-
                     case PROBE_RESPONSE: // WAIT PACK AUTH REQUEST
                         if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION)
                         {
                             ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, AUTHENTICATION_RESPONSE);
-                            // last_transmission_us = 0;
                         }
                         break;
                     case AUTHENTICATION_REQUEST: // WAIT PACK AUTH RESPONSE
@@ -328,9 +289,9 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Authentication response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, ASSOCIATION_REQUEST);
-                            // last_transmission_us = 0;
+                            last_transmission_us = 0;
                         }
-
+                        // solução paleativa
                         else if (p->frame_control.sub_type == AUTHENTICATION_REQUEST)
                         {
                             connection = remove_conection(&list_connections, &connection);
@@ -341,7 +302,6 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Association request received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection, ASSOCIATION_RESPONSE);
-                            // last_transmission_us = 0;
                         }
                         break;
                     case ASSOCIATION_REQUEST: // associated
@@ -350,36 +310,33 @@ void mac_task(void *pvParameters)
                             ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             ESP_LOGW("assoc-data", "Received data frame, will handle");
                             update_conection(connection, CONNECTED);
-                            // last_transmission_us = 0;
                         }
                         break;
+                    default:
+                        break;
+                    }
+                }
+                else
+                {
+                    switch (connection->status)
+                    {
                     case ASSOCIATION_RESPONSE: //
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_ACTION)
+                        if (p->frame_control.sub_type == IEEE80211_TYPE_CTL_SUBTYPE_ACK)
                         {
-                            ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
+                            ESP_LOGW(TAG, "RECEBI UM ACK from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             ESP_LOGW("assoc-data", "Received data frame, will handle");
                             update_conection(connection, CONNECTED);
                             // last_transmission_us = 0;
                         }
                         break;
                     case CONNECTED:
-                        ESP_LOGI(TAG, "Conectado");
+                        ESP_LOGW(TAG, "Conectado com : " MACSTR "\n", MAC2STR(p->transmitter_address));
                         update_conection(connection, CONNECTED);
-
                     default:
                         break;
                     }
                 }
-                else if (p->frame_control.type == IEEE80211_TYPE_DATA)
-                {
-                    if(connection->status == CONNECTED){
-                        update_conection(connection, CONNECTED);
 
-
-                        
-                    }
-                    
-                }
                 free(packet);
             }
         }
@@ -400,51 +357,46 @@ void mac_task(void *pvParameters)
         {
             // enviando probe request
             ESP_LOGI(TAG, "Sending PROBEREQUEST");
-            tx(data_frame_probe_request, sizeof(data_frame_probe_request));
+            set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
+            tx(mac_frame_header_template, sizeof(mac_frame_header_template));
             temp_probe_request = 0;
             continue;
         }
         connection = list_connections;
+
         while (connection != NULL)
         {
             switch (connection->status)
             {
             case PROBE_RESPONSE:
                 ESP_LOGI(TAG, "Sending PROBE RESPONSE");
-                data_frame_probe_request[0] = IEEE80211_PROBE_RESPONSE;
-                set_address_receiver(data_frame_probe_request, connection->mac_adress);
-                tx(data_frame_probe_request, sizeof(data_frame_probe_request));
-                data_frame_probe_request[0] = IEEE80211_PROBE_REQUEST;
+                set_addresses(mac_frame_header_template, IEEE80211_PROBE_RESPONSE, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             case AUTHENTICATION_REQUEST:
                 ESP_LOGI(TAG, "Sending authentication Request!");
-                set_address_receiver(to_ap_auth_frame, connection->mac_adress);
-                tx(to_ap_auth_frame, sizeof(to_ap_auth_frame));
+                set_addresses(mac_frame_header_template, IEEE80211_AUTHENTICATION, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             case AUTHENTICATION_RESPONSE:
                 ESP_LOGI(TAG, "Sending authentication response!");
-                set_address_receiver(to_ap_auth_frame, connection->mac_adress);
-                tx(to_ap_auth_frame, sizeof(to_ap_auth_frame));
+                set_addresses(mac_frame_header_template, IEEE80211_AUTHENTICATION, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             case ASSOCIATION_REQUEST:
                 ESP_LOGI(TAG, "Sending association request frame!");
-                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
-                set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
-                tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
+                set_addresses(mac_frame_header_template, IEEE80211_ASSOCIATION_REQ, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             case ASSOCIATION_RESPONSE:
                 ESP_LOGI(TAG, "Sending association response frame!");
-                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_RESP;
-                set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
-                tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
-                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
+                set_addresses(mac_frame_header_template, IEEE80211_ASSOCIATION_RESP, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             case CONNECTED:
-                ESP_LOGI(TAG, "ACK");
-                to_ap_assoc_frame[0] = IEEE80211_ACK;
-                set_address_receiver(to_ap_assoc_frame, connection->mac_adress);
-                tx(to_ap_assoc_frame, sizeof(to_ap_assoc_frame));
-                to_ap_assoc_frame[0] = IEEE80211_ASSOCIATION_REQ;
+                ESP_LOGI(TAG, "Sending ACK");
+                set_addresses(mac_frame_header_template, IEEE80211_ACK, connection->mac_adress);
+                tx(mac_frame_header_template, sizeof(mac_frame_header_template));
                 break;
             default:
                 break;
@@ -454,6 +406,7 @@ void mac_task(void *pvParameters)
             {
                 connection = remove_conection(&list_connections, &connection);
             }
+
             if (connection != NULL)
             {
                 connection = connection->next;
