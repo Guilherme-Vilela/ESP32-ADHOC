@@ -162,9 +162,11 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
         printf(" %x ", packet->payload[contador]);
     }
     printf("\n\n");
-    p->frame_control.sub_type = packet->payload[0] & 0b00001111;
-    p->frame_control.type =  ((packet->payload[0] & 0b00110000) >>4);
-    p->frame_control.protocol_version = (packet->payload[0] & 0b11000000)>>6;
+   
+    uint8_t value =  packet->payload[0];
+    p->frame_control.sub_type = value & 0b00001111;
+    p->frame_control.type =  ((value & 0b00110000) >>4);
+    p->frame_control.protocol_version = ((value & 0b11000000)>>6);
 
     printf("Tipo   = %x \n", p->frame_control.type);
     printf("protocol_version   = %x \n", p->frame_control.protocol_version);
@@ -252,15 +254,16 @@ void mac_task(void *pvParameters)
         wifi_promiscuous_pkt_t *packet;
         if (xQueueReceive(reception_queue, &packet, 10))
         {
+            
             mac80211_frame *p = (mac80211_frame *)packet->payload;
-            p->frame_control.sub_type = packet->payload[0] & 0b00001111;
-            p->frame_control.type =  ((packet->payload[0] & 0b00110000) >>4);
-            p->frame_control.protocol_version = (packet->payload[0] & 0b11000000)>>6;
+            p->frame_control.sub_type = (uint8_t) packet->payload[0] & 0b00001111;
+            p->frame_control.type =  (uint8_t)((packet->payload[0] & 0b00110000) >>3)& 0b00000011;
+            p->frame_control.protocol_version = (uint8_t)((packet->payload[0] & 0b11000000)>>5) & 0b00000011;
             // ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11  ", packet->payload, packet->rx_ctrl.sig_len - 4, ESP_LOG_INFO);
 
             // ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
             //  ESP_LOGW(TAG, "SUBTIPO : %x", p->frame_control.sub_type);
-            memcpy(ap_address, p->transmitter_address, 6);
+            //memcpy(ap_address, p->transmitter_address, 6);
 
             connection = search_conection(list_connections, p->transmitter_address);
 

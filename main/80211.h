@@ -67,7 +67,7 @@ protocol version   -    Type           -      Subtype    -    To DS  - From DS -
 
 
 #define IEEE80211_PROBE_REQUEST     0x84
-#define IEEE80211_PROBE_RESPONSE    0xC5
+#define IEEE80211_PROBE_RESPONSE    0x85
 #define IEEE80211_AUTHENTICATION    0x0b
 #define IEEE80211_ASSOCIATION_REQ   0x00
 #define IEEE80211_ASSOCIATION_RESP  0x01
