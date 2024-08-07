@@ -162,15 +162,12 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
         printf(" %x ", packet->payload[contador]);
     }
     printf("\n\n");
-    if (packet->payload[0] < 16)
-    {
-        uint8_t valor = packet->payload[0];
-        p->frame_control.sub_type = valor;
-        p->frame_control.type = 0;
-        p->frame_control.protocol_version = 0;
-    }
+    p->frame_control.sub_type = packet->payload[0] & 0b00001111;
+    p->frame_control.type =  ((packet->payload[0] & 0b00110000) >>4);
+    p->frame_control.protocol_version = (packet->payload[0] & 0b11000000)>>6;
 
     printf("Tipo   = %x \n", p->frame_control.type);
+    printf("protocol_version   = %x \n", p->frame_control.protocol_version);
     printf("Subtipo= %x \n", p->frame_control.sub_type);
     //  check that receiver mac address matches our mac address or is broadcast
     if ((memcmp(module_mac_addr, p->receiver_address, 6)) && (memcmp(mac_listen_probe_request, p->receiver_address, 6)))
@@ -256,13 +253,9 @@ void mac_task(void *pvParameters)
         if (xQueueReceive(reception_queue, &packet, 10))
         {
             mac80211_frame *p = (mac80211_frame *)packet->payload;
-            if (packet->payload[0] < 16)
-            {
-                uint8_t valor = packet->payload[0];
-                p->frame_control.sub_type = valor;
-                p->frame_control.type = 0;
-                p->frame_control.protocol_version = 0;
-            }
+            p->frame_control.sub_type = packet->payload[0] & 0b00001111;
+            p->frame_control.type =  ((packet->payload[0] & 0b00110000) >>4);
+            p->frame_control.protocol_version = (packet->payload[0] & 0b11000000)>>6;
             // ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11  ", packet->payload, packet->rx_ctrl.sig_len - 4, ESP_LOG_INFO);
 
             // ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
