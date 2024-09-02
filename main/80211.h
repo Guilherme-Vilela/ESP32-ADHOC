@@ -30,6 +30,17 @@
  *  15/10/2023 redfast00: modified for ESP32 wifi implementation
  */
 
+
+/*         -------------------       Frame Control format ----------------
+protocol version   -    Type           -      Subtype    -    To DS  - From DS - More Fragments  - More Fragments - Retry - Power Management 
+  2 bits                  2bits         -      4bits     -    1bit  -  1bit   -     1bit        -     1 bit      -  1bit -  1bit
+
+|              first byte                                 |       second byte                                                                |
+
+
+
+
+*/
 #define QEMU_PACKED __attribute__((packed))
 
 
@@ -47,9 +58,32 @@
 #define IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_RESP 0x01
 #define IEEE80211_TYPE_MGT_SUBTYPE_DISASSOCIATION   0x0a
 
+#define IEEE80211_TYPE_DATA_SUBTYPE_DATA 0x00
+#define IEEE80211_TYPE_DATA_SUBTYPE_NO_DATA 0x04
+#define IEEE80211_TYPE_DATA_SUBTYPE_DATA_QOS 0x08
+#define IEEE80211_TYPE_DATA_SUBTYPE_QOS 0x0c
+
 #define IEEE80211_TYPE_CTL_SUBTYPE_ACK          0x0d
 
-#define IEEE80211_TYPE_DATA_SUBTYPE_DATA        0x00
+
+#define IEEE80211_PROBE_REQUEST     0x84
+#define IEEE80211_PROBE_RESPONSE    0x85
+#define IEEE80211_AUTHENTICATION    0x8b
+#define IEEE80211_ASSOCIATION_REQ   0x80
+#define IEEE80211_ASSOCIATION_RESP  0x81
+#define IEEE80211_ACK               0x9d
+#define IEEE80211_SEND_DATA         0xA0
+
+#define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+#define IEEE80211_RECIVER_ADDR      0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+#define IEEE80211_BSSID             0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#define IEEE80211_FRAME_CONTROL     0x00, 0x00
+#define IEEE80211_DURATION_ID       0x00, 0x00
+#define IEEE80211_SEQUENCE_CONTROL  0x00, 0x00
+#define IEEE80211_QOS_CONTROL       0x00, 0x00
+
+
+
 
 typedef uint8_t macaddr_t[6];
 
@@ -58,11 +92,11 @@ typedef uint8_t macaddr_t[6];
 typedef struct mac80211_frame {
     struct mac80211_frame_control {
         unsigned    protocol_version    : 2;
-        unsigned    type            : 2;
-        unsigned    sub_type        : 4;
-        unsigned    to_ds           : 1;
-        unsigned    from_ds         : 1;
-        unsigned    _flags:6;
+        unsigned    type                : 2;
+        unsigned    sub_type            : 4;
+        unsigned    to_ds               : 1;
+        unsigned    from_ds             : 1;
+        unsigned    _flags              : 6;
     } QEMU_PACKED frame_control;
     uint16_t  duration_id;
     macaddr_t receiver_address;

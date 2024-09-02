@@ -1,17 +1,48 @@
 #include "hardware.h"
 typedef enum {
-    PROBE_RESPONSE,
-    AUTHENTICATION_REQUEST,
-    AUTHENTICATION_RESPONSE,
-    ASSOCIATION_REQUEST,
-    ASSOCIATION_RESPONSE,
-    CONNECTED
+    PROBE_RESPONSE,                             
+    AUTHENTICATION_REQUEST,         
+    AUTHENTICATION_RESPONSE,            
+    ASSOCIATION_REQUEST,            
+    ASSOCIATION_RESPONSE,           
+    CONNECTED          
 } openmac_sta_state_t;
 
+typedef enum {
+    WAIT,
+    SEND_MESSAGE_DESTINATIONS,
+    SEND_MESSAGE_DESTINATIONS_INTEREST,  
+    SEND_REQUESTED_MESSAGES_INTEREST,
+    SEND_REQUESTED_MESSAGES,
+    COMPLETE
 
-#define time_transmit 1000000
-#define pre_escale_probe_request 5 // 0 a 255 
-#define time_unit 1000 ///definida com 1u / time_unit
+} communication_stages;
+typedef struct current_connections
+{
+    uint8_t mac_adress[6];
+    openmac_sta_state_t status;
+    uint8_t communication_attempts;
+    uint16_t wait_time_to_send;
+    uint64_t last_transmission;
+    communication_stages communication_state;
+    struct current_connections *next;
+} current_connections;
+
+// typedef enum {
+//     SEND_DATA_DESTINATIONS = 0,
+//     SEND_DATA_NAME =1
+// } dtn_comunicate_state;
+
+//0.000001
+#define time_transmit 1000000 // 1s
+#define max_attempts 30 // 10 tentativas
+#define wait_time_to_send_dafault 10000 //tempo de envio das mensagens, definiado pelo time_unit
+#define wait_time_to_send_probe_request 5000 //tempo de envio das mensagens, definiado pelo time_unit
+#define size_mensage 100
+#define time_unit 1000 // tempo definiado como 1ms. 1 = 1us
+#define NOMEESP "Ola sou NO 3"
+
+
 void open_mac_rx_callback(wifi_promiscuous_pkt_t* packet);
 void open_mac_tx_func_callback(tx_func* t);
 
