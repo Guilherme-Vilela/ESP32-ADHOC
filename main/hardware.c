@@ -502,7 +502,7 @@ void wifi_hardware_task(hardware_mac_args *pvParameter)
 				
 				uint32_t cause = queue_entry.content.rx.interrupt_received;
 				//printf("\n Este é o codigo da interrupção: %x  \n" , );
-				ESP_LOGW(TAG, "interrupt = 0x%08lx", cause);
+				//ESP_LOGW(TAG, "interrupt = 0x%08lx", cause);
 				if (cause & 0x800)
 				{
 					// Watchdog panic

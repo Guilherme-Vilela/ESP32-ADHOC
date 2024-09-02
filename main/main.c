@@ -20,6 +20,7 @@
 #error "This project currently still uses the proprietary wifi library for initialization, this was only tested with ESP-IDF v5.0.1"
 #endif
 
+
 hardware_mac_args open_hw_args = {
 	._rx_callback = open_mac_rx_callback,
 	._tx_func_callback = open_mac_tx_func_callback

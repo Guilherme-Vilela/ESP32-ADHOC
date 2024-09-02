@@ -68,11 +68,11 @@ protocol version   -    Type           -      Subtype    -    To DS  - From DS -
 
 #define IEEE80211_PROBE_REQUEST     0x84
 #define IEEE80211_PROBE_RESPONSE    0x85
-#define IEEE80211_AUTHENTICATION    0x0b
-#define IEEE80211_ASSOCIATION_REQ   0x00
-#define IEEE80211_ASSOCIATION_RESP  0x01
-#define IEEE80211_ACK               0x0d
-#define IEEE80211_SEND_DATA         0x20
+#define IEEE80211_AUTHENTICATION    0x8b
+#define IEEE80211_ASSOCIATION_REQ   0x80
+#define IEEE80211_ASSOCIATION_RESP  0x81
+#define IEEE80211_ACK               0x9d
+#define IEEE80211_SEND_DATA         0xA0
 
 #define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 #define IEEE80211_RECIVER_ADDR      0xff, 0xff, 0xff, 0xff, 0xff, 0xff
