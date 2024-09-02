@@ -45,7 +45,7 @@ current_connections *insert_current_connections(current_connections *head, uint8
     new_conection->next = NULL;
     new_conection->communication_attempts = 0;
     new_conection->wait_time_to_send = wait_time_to_send_dafault;
-    new_conection->last_transmission = 0;
+    new_conection->clock_transmission = wait_time_to_send_dafault;
     new_conection->communication_state = WAIT;
 
     if (head == NULL)
@@ -74,7 +74,7 @@ void update_communication_state(current_connections *connection, communication_s
 }
 void update_wait_time_to_send(current_connections *connection)
 {
-    connection->wait_time_to_send += 7;
+    connection->wait_time_to_send += 1;
 }
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
@@ -303,7 +303,8 @@ void send_mensage_mac_protocol(current_connections *connection)
 }
 void mac_task(void *pvParameters)
 {
-    uint64_t last_transmission_probe_request = esp_timer_get_time();
+    uint64_t last_transmission_us = esp_timer_get_time();
+    uint8_t pre_escale_probe_request = 50;
     list_connections = create_list_current_connections();
 
     current_connections *connection_aux = NULL;
@@ -431,13 +432,18 @@ void mac_task(void *pvParameters)
             continue;
         };
 
-        if (((esp_timer_get_time() - last_transmission_probe_request) / time_unit) > wait_time_to_send_probe_request)
+        if (!((esp_timer_get_time()-last_transmission_us)/time_unit))
+        continue;
+
+        if (!pre_escale_probe_request)
         {
             // enviando probe request
             ESP_LOGI(TAG, "Sending PROBEREQUEST");
             set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
             tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-            last_transmission_probe_request = esp_timer_get_time();
+            pre_escale_probe_request = wait_time_to_send_probe_request;
+        }else{
+            pre_escale_probe_request--;
         }
 
         connection_aux = list_connections;
@@ -445,10 +451,12 @@ void mac_task(void *pvParameters)
         while (connection_aux != NULL)
         {
 
-            if (((esp_timer_get_time() - connection_aux->last_transmission) / time_unit) > connection_aux->wait_time_to_send)
+            if (!connection_aux->clock_transmission)
             {
                 send_mensage_mac_protocol(connection_aux);
-                connection_aux->last_transmission = esp_timer_get_time();
+                connection_aux->clock_transmission = connection_aux->wait_time_to_send;
+            }else{
+                connection_aux->clock_transmission--;
             }
 
             if (connection_aux->communication_attempts % 3 == 0)
@@ -466,5 +474,6 @@ void mac_task(void *pvParameters)
                 connection_aux = connection_aux->next;
             }
         }
+        last_transmission_us = esp_timer_get_time();
     }
 }
