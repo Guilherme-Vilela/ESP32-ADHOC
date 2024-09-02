@@ -263,6 +263,11 @@ void send_name(uint8_t *mac_reciver)
 
 void send_mensage_mac_protocol(current_connections *connection)
 {
+    if (!tx)
+    {
+        ESP_LOGW(TAG, "no transmit function yet");
+        return;
+    };
     connection->communication_attempts++;
     switch (connection->status)
     {
@@ -418,8 +423,6 @@ void mac_task(void *pvParameters)
                         break;
                     }
                 }
-                free(packet);
-                send_mensage_mac_protocol(connection_aux);
             }
         }
 
@@ -430,7 +433,6 @@ void mac_task(void *pvParameters)
             ESP_LOGW(TAG, "no transmit function yet");
             continue;
         };
-
         if (((esp_timer_get_time() - last_transmission_probe_request) / time_unit) > wait_time_to_send_probe_request)
         {
             // enviando probe request
