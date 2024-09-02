@@ -17,6 +17,16 @@ typedef enum {
     COMPLETE
 
 } communication_stages;
+typedef struct current_connections
+{
+    uint8_t mac_adress[6];
+    openmac_sta_state_t status;
+    uint8_t communication_attempts;
+    uint16_t wait_time_to_send;
+    uint64_t last_transmission;
+    communication_stages communication_state;
+    struct current_connections *next;
+} current_connections;
 
 // typedef enum {
 //     SEND_DATA_DESTINATIONS = 0,
@@ -25,11 +35,11 @@ typedef enum {
 
 //0.000001
 #define time_transmit 1000000 // 1s
-#define max_attempts 10 // 10 tentativas
-#define wait_time_to_send_dafault 1000 //tempo de envio das mensagens, definiado pelo time_unit
+#define max_attempts 30 // 10 tentativas
+#define wait_time_to_send_dafault 10000 //tempo de envio das mensagens, definiado pelo time_unit
 #define wait_time_to_send_probe_request 5000 //tempo de envio das mensagens, definiado pelo time_unit
 #define size_mensage 100
-#define time_unit 1 // tempo definiado com 1ms. 1 = 1us
+#define time_unit 1000 // tempo definiado como 1ms. 1 = 1us
 #define NOMEESP "Ola sou NO 3"
 
 

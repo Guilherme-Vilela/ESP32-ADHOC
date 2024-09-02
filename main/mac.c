@@ -19,17 +19,6 @@ static QueueHandle_t reception_queue = NULL;
 macaddr_t ssid = {'w', 'i', 'f', 'd', 't', 'n'};
 macaddr_t ap_address = {0, 0, 0, 0, 0, 0};
 
-typedef struct current_connections
-{
-    uint8_t mac_adress[6];
-    openmac_sta_state_t status;
-    uint8_t communication_attempts;
-    uint16_t wait_time_to_send;
-    uint64_t last_transmission;
-    communication_stages communication_state;
-    struct current_connections *next;
-} current_connections;
-
 current_connections *list_connections = NULL;
 
 uint8_t mac_frame_header_template[] = {
@@ -55,7 +44,8 @@ current_connections *insert_current_connections(current_connections *head, uint8
     new_conection->status = state;
     new_conection->next = NULL;
     new_conection->communication_attempts = 0;
-    new_conection->wait_time_to_send = pre_escale_send_menssage_default;
+    new_conection->wait_time_to_send = wait_time_to_send_dafault;
+    new_conection->last_transmission = 0;
     new_conection->communication_state = WAIT;
 
     if (head == NULL)
@@ -77,12 +67,14 @@ void update_conection(current_connections *connection, uint8_t state)
     connection->status = state;
     connection->communication_attempts = 0;
 }
-void update_communication_state(current_connections *connection, communication_stages state){
+void update_communication_state(current_connections *connection, communication_stages state)
+{
     connection->communication_state = state;
     connection->communication_attempts = 0;
 }
-void update_pre_escale_send_menssage(current_connections *connection){
-    connection->pre_escale_send_menssage++;
+void update_wait_time_to_send(current_connections *connection)
+{
+    connection->wait_time_to_send += 7;
 }
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
@@ -214,24 +206,24 @@ void open_mac_tx_func_callback(tx_func *t)
     tx = t;
 }
 
-void send_mensage(uint8_t *mac_reciver,communication_stages state)
+void send_mensage(uint8_t *mac_reciver, communication_stages state)
 {
     switch (state)
     {
     case SEND_MESSAGE_DESTINATIONS:
-        //envia os destinos das mensagens
+        // envia os destinos das mensagens
         break;
     case SEND_MESSAGE_DESTINATIONS_INTEREST:
-        //envia os destinos das mensagens
-        break;  
+        // envia os destinos das mensagens
+        break;
     case SEND_REQUESTED_MESSAGES_INTEREST:
         break;
     case SEND_REQUESTED_MESSAGES:
-        break; 
+        break;
     default:
         break;
     }
-    //uint8_t mac_frame_data[size_mensage];
+    // uint8_t mac_frame_data[size_mensage];
 
     // memcpy(mac_frame_data, mac_frame_header_template, 24);
     // mac_frame_data[24] = 0;
@@ -311,7 +303,6 @@ void send_mensage_mac_protocol(current_connections *connection)
 }
 void mac_task(void *pvParameters)
 {
-    uint8_t temp_probe_request = 0;
     uint64_t last_transmission_probe_request = esp_timer_get_time();
     list_connections = create_list_current_connections();
 
@@ -399,7 +390,7 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection_aux, CONNECTED);
-                            update_communication_state(connection_aux,SEND_MESSAGE_DESTINATIONS);
+                            update_communication_state(connection_aux, SEND_MESSAGE_DESTINATIONS);
                         }
                         break;
                     default:
@@ -422,7 +413,7 @@ void mac_task(void *pvParameters)
                             update_conection(connection_aux, CONNECTED);
                         }
                         break;
-                    
+
                     default:
                         break;
                     }
@@ -440,39 +431,40 @@ void mac_task(void *pvParameters)
             continue;
         };
 
-        time_awaited =(esp_timer_get_time() - last_transmission_us)/time_unit;
-
-        if (temp_probe_request > pre_escale_probe_request)
+        if (((esp_timer_get_time() - last_transmission_probe_request) / time_unit) > wait_time_to_send_probe_request)
         {
             // enviando probe request
             ESP_LOGI(TAG, "Sending PROBEREQUEST");
             set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
             tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-            temp_probe_request = 0;
-            continue;
+            last_transmission_probe_request = esp_timer_get_time();
         }
+
         connection_aux = list_connections;
 
-        while (connection_aux != NULL) 
+        while (connection_aux != NULL)
         {
 
-            if(connection_aux->)
+            if (((esp_timer_get_time() - connection_aux->last_transmission) / time_unit) > connection_aux->wait_time_to_send)
+            {
+                send_mensage_mac_protocol(connection_aux);
+                connection_aux->last_transmission = esp_timer_get_time();
+            }
 
+            if (connection_aux->communication_attempts % 3 == 0)
+            {
+                update_wait_time_to_send(connection_aux);
+            }
 
-            // verifica se é preciso remover alguma conexão
             if (connection_aux->communication_attempts > max_attempts)
             {
                 connection_aux = remove_conection(&list_connections, &connection_aux);
             }
-            if(connection_aux->communication_attempts%3 == 0){
-                update_pre_escale_send_menssage(connection_aux);
-            }
+
             if (connection_aux != NULL)
             {
                 connection_aux = connection_aux->next;
             }
         }
-
-        last_transmission_us = esp_timer_get_time();
     }
 }
