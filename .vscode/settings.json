@@ -1,8 +1,11 @@
 {
     "idf.adapterTargetName": "esp32",
-    "idf.portWin": "COM6",
+    "idf.portWin": "COM4",
     "idf.flashType": "UART",
     "files.associations": {
         "hardware.h": "c"
-    }
+    },
+    "idf.espIdfPathWin": "C:\\Users\\Guilherme\\esp\\v5.0.1\\esp-idf",
+    "idf.toolsPathWin": "C:\\Users\\Guilherme\\.espressif",
+    "idf.pythonInstallPath": "C:\\Users\\Guilherme\\.espressif\\tools\\idf-python\\3.11.2\\python.exe"
 }

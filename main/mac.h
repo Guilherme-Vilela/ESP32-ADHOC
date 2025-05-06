@@ -14,8 +14,9 @@ typedef enum {
     SEND_MESSAGE_DESTINATIONS_INTEREST,  
     SEND_REQUESTED_MESSAGES_INTEREST,
     SEND_REQUESTED_MESSAGES,
-    COMPLETE
-
+    COMPLETE,
+    SEND_1,
+    SEND_2
 } communication_stages;
 typedef struct current_connections
 {
@@ -28,19 +29,29 @@ typedef struct current_connections
     struct current_connections *next;
 } current_connections;
 
-// typedef enum {
-//     SEND_DATA_DESTINATIONS = 0,
-//     SEND_DATA_NAME =1
-// } dtn_comunicate_state;
+typedef struct payload_mensages
+{
+    uint8_t id;                     //0
+    //uint64_t time_create;            
+    uint8_t  destination_mac[6];    //1-6
+    uint8_t size_of_data; //        //7
+    uint8_t size_of_path; //        //8
+    uint8_t size_packet;           //9
+    uint8_t *data;                  //11 - 
+    uint8_t *path_mensage; // vai virar uma nova estrutura       MAC-TIME/MAC-TIME
+    struct payload_mensages *next;
+
+} payload_mensages;
 
 //0.000001
 #define time_transmit 1000000 // 1s
-#define max_attempts 30 // 10 tentativas
+#define max_attempts 10 // 10 tentativas
 #define wait_time_to_send_dafault 10000 //tempo de envio das mensagens, definiado pelo time_unit
 #define wait_time_to_send_probe_request 5000 //tempo de envio das mensagens, definiado pelo time_unit
 #define size_mensage 100
 #define time_unit 1000 // tempo definiado como 1ms. 1 = 1us
-#define NOMEESP "Ola sou NO 3"
+#define NOME_ESP "Ola sou NO 2"
+#define ID_ESP 4
 
 
 void open_mac_rx_callback(wifi_promiscuous_pkt_t* packet);
