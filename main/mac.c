@@ -14,14 +14,14 @@
 #include "driver/gpio.h"
 #include <string.h>
 
+// variaveis globais
 static char *TAG = "mac.c";
 static tx_func *tx = NULL;
 static QueueHandle_t reception_queue = NULL;
 macaddr_t ssid = {'w', 'i', 'f', 'd', 't', 'n'};
 macaddr_t ap_address = {0, 0, 0, 0, 0, 0};
+SemaphoreHandle_t timer_send_mensage_semaphore;
 
-current_connections *list_connections = NULL;
-payload_mensages *list_mensages = NULL;
 uint8_t mac_frame_header_template[] = {
     IEEE80211_FRAME_CONTROL,    // #define IEEE80211_FRAME_CONTROL     0x00, 0x00
     IEEE80211_DURATION_ID,      // #define IEEE80211_DURATION_ID       0x00, 0x00
@@ -49,12 +49,13 @@ current_connections *insert_current_connections(current_connections *head, uint8
     new_conection->status = state;
     new_conection->next = NULL;
     new_conection->communication_attempts = 0;
-    new_conection->last_transmission = 0;
+    // new_conection->last_transmission = 0;
     new_conection->communication_state = WAIT;
-    while (new_conection->wait_time_to_send > 750 || new_conection->wait_time_to_send < 500)
-    {
-        esp_fill_random(&new_conection->wait_time_to_send, 2);
-    }
+    new_conection->wait_time_to_send = 0;
+    // while (new_conection->wait_time_to_send > 750 || new_conection->wait_time_to_send < 500)
+    // {
+    //     esp_fill_random(&new_conection->wait_time_to_send, 2);
+    // }
 
     if (head == NULL)
     {
@@ -113,7 +114,7 @@ payload_mensages *insert_payload_mensage(payload_mensages *head, uint8_t *mensag
     memcpy(&new_mensage->size_of_path, 8 + mensage_received, 1);
     // memcpy(&new_mensage->size_packet, 9 + mensage_received, 1);
     new_mensage->size_packet = 0x41;
-    ESP_LOGW(TAG, "taamnho mensagem : %x", new_mensage->size_of_data);
+    ESP_LOGW(TAG, "tamnho mensagem : %x", new_mensage->size_of_data);
     ESP_LOGW(TAG, "caminho : %x", new_mensage->size_of_path);
     ESP_LOGW(TAG, "tamanho pacote : %x", new_mensage->size_packet);
     uint8_t *mensage_data_received = malloc(new_mensage->size_of_data);
@@ -136,7 +137,7 @@ payload_mensages *insert_payload_mensage(payload_mensages *head, uint8_t *mensag
         item = item->next;
     }
     item->next = new_mensage;
-
+    ESP_LOGW(TAG, "NOVA CONEXAO CRIADA");
     return head;
 }
 payload_mensages *remove_mensage(payload_mensages **head, payload_mensages **connection_removed)
@@ -166,23 +167,22 @@ payload_mensages *remove_mensage(payload_mensages **head, payload_mensages **con
     }
     return previous_item;
 }
+
+current_connections *list_connections;
+payload_mensages *list_mensages;
+
 void update_conection(current_connections *connection, uint8_t state)
 {
     connection->status = state;
     connection->communication_attempts = 0;
+    connection->wait_time_to_send = 0;
 }
 void update_communication_state(current_connections *connection, communication_stages state)
 {
     connection->communication_state = state;
     connection->communication_attempts = 0;
 }
-void update_wait_time_to_send(current_connections *connection)
-{
-    while (connection->wait_time_to_send > 750 || connection->wait_time_to_send < 500)
-    {
-        esp_fill_random(&connection->wait_time_to_send, 2);
-    }
-}
+
 current_connections *search_conection(current_connections *head, uint8_t mac[6])
 {
     current_connections *item = head;
@@ -376,7 +376,7 @@ void send_mensages(current_connections *connection)
 
         set_addresses(mac_frame_data, IEEE80211_ACK, connection->mac_adress);
         tx(mac_frame_data, sizeof(mac_frame_data));
-        connection->wait_time_to_send = 5000;
+        // connection->wait_time_to_send = 5000;
         break;
 
     default:
@@ -393,26 +393,7 @@ void send_mensages(current_connections *connection)
         break;
     }
 }
-void send_probe_request(void *pvParameters){
-    while (true) {
-        
-        if (!tx)
-        {
-            ESP_LOGW(TAG, "no transmit function yet");
-         }else{
-            //esp_fill_random(&time_wait_probe_requenst, 2);
-           // time_wait_probe_requenst = time_wait_probe_requenst & 0x0FFF;
-            // time_wait_probe_requenst += wait_time_to_send_probe_request;
-            //  enviando probe request
-            ESP_LOGI(TAG, "Sending PROBEREQUEST");
-            set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
-            tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-            //last_transmission_probe_request = esp_timer_get_time();
-        }
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    vTaskDelete(NULL);
-}
+
 void send_mensage_mac_protocol(current_connections *connection)
 {
     connection->communication_attempts++;
@@ -445,9 +426,9 @@ void send_mensage_mac_protocol(current_connections *connection)
         break;
     case CONNECTED:
         ESP_LOGI(TAG, "ACK !");
-        send_mensages(connection);
-        // set_addresses(mac_frame_header_template, IEEE80211_ACK, connection->mac_adress);
-        // tx(mac_frame_header_template, sizeof(mac_frame_header_template));
+        // send_mensages(connection);
+        set_addresses(mac_frame_header_template, IEEE80211_ACK, connection->mac_adress);
+        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
         break;
 
     default:
@@ -456,22 +437,9 @@ void send_mensage_mac_protocol(current_connections *connection)
 }
 void mac_task(void *pvParameters)
 {
-    
-    //uint64_t last_transmission_probe_request = esp_timer_get_time();
-    uint16_t time_wait_probe_requenst = wait_time_to_send_probe_request;
     list_connections = create_list_current_connections();
     list_mensages = create_list_payload_mensages();
-    //if (ID_ESP == 1)
-    //{
-        //uint8_t mac_target[6] = {0Xff, 0x22, 0x33, 0x71, 0x45, 0x90};
-       // uint8_t mensage_aux[35] = "ACIDENTE NO 1, POSICAO X Y, ATENCAO";
-        //uint8_t *mensage_to_send = malloc(35);
-        //memcpy(mensage_to_send, mensage_aux, 35);
 
-        //list_mensages = create_payload_mensage(list_mensages, mac_target, mensage_to_send, 35);
-       // gpio_set_level(19, 1);
-        
-    //}//
     current_connections *connection_aux = NULL;
 
     build_frame(mac_frame_header_template, ap_address, module_mac_addr, ssid);
@@ -480,12 +448,12 @@ void mac_task(void *pvParameters)
 
     reception_queue = xQueueCreate(10, sizeof(wifi_promiscuous_pkt_t *));
     assert(reception_queue);
-
+    wifi_promiscuous_pkt_t *packet;
     while (true)
     {
-        wifi_promiscuous_pkt_t *packet;
+
         // TRATAMENTO DE MENSAGEM
-        if (xQueueReceive(reception_queue, &packet, 10))
+        if (xQueueReceive(reception_queue, &packet, portMAX_DELAY) == pdPASS)
         {
             mac80211_frame *p = (mac80211_frame *)packet->payload;
             uint8_t value = packet->payload[0];
@@ -496,12 +464,44 @@ void mac_task(void *pvParameters)
             p->frame_control.type = ((value & 0b00110000) >> 4);
             p->frame_control.protocol_version = ((value & 0b11000000) >> 6);
 
-            connection_aux = search_conection(list_connections, p->transmitter_address);
-
             ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
+
             ESP_LOGW(TAG, "SUBTIPO : %x", p->frame_control.sub_type);
+            switch (p->frame_control.sub_type)
+            {
+            case IEEE80211_TYPE_MGT_SUBTYPE_BEACON:
+                ESP_LOGW(TAG, "BEACON ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_ACTION:
+                ESP_LOGW(TAG, "ACTION ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_PROBE_REQ:
+                ESP_LOGW(TAG, "PROBE_REQ ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP:
+                ESP_LOGW(TAG, "PROBE RESP ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION:
+                ESP_LOGW(TAG, "AUTH ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_DEAUTHENTICATION:
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_REQ:
+                ESP_LOGW(TAG, "ASSOC REQ ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_RESP:
+                ESP_LOGW(TAG, "ASSOC RESPONSE ");
+                break;
+            case IEEE80211_TYPE_MGT_SUBTYPE_DISASSOCIATION:
+                break;
+            default:
+                break;
+            }
+
             ESP_LOGW(TAG, "TAMANHO DA MENSAGEM : %i", packet->rx_ctrl.sig_len);
             ESP_LOGW(TAG, "DADO ENVIADO POR : " MACSTR "\n", MAC2STR(p->transmitter_address));
+
+            connection_aux = search_conection(list_connections, p->transmitter_address);
 
             // verifica se a conexão existe
             if (connection_aux == NULL)
@@ -516,18 +516,12 @@ void mac_task(void *pvParameters)
                 }
             }
             else
-            { // se o mac esta na lsita de conexões
-                if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP && connection_aux->status == PROBE_RESPONSE)
-                {
-                    update_conection(connection_aux, AUTHENTICATION_REQUEST);
-                    ESP_LOGI(TAG, "Passando para etapa de autenticação");
-                }
-            }
-
-            connection_aux = search_conection(list_connections, p->transmitter_address);
-
-            if (connection_aux != NULL)
             {
+                // if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP && connection_aux->status == PROBE_RESPONSE)
+                // {
+                //     update_conection(connection_aux, AUTHENTICATION_REQUEST);
+                //     ESP_LOGI(TAG, "Passando para etapa de autenticação");
+                // }
                 if (p->frame_control.type == IEEE80211_TYPE_MGT)
                 {
                     switch (connection_aux->status)
@@ -537,15 +531,21 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection_aux, AUTHENTICATION_RESPONSE);
-                            send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
+                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
                         }
+                        // else if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP)
+                        // {
+                        //     ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
+                        //     update_conection(connection_aux, AUTHENTICATION_RESPONSE);
+                        //     // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
+                        // }
                         break;
                     case AUTHENTICATION_REQUEST: // WAIT PACK AUTH RESPONSE
                         if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION)
                         {
                             ESP_LOGW(TAG, "Authentication response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection_aux, ASSOCIATION_REQUEST);
-                            send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
+                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
                         }
                         break;
                     case AUTHENTICATION_RESPONSE: // authenticated, wait for association response packet
@@ -553,7 +553,7 @@ void mac_task(void *pvParameters)
                         {
                             ESP_LOGW(TAG, "Association request received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection_aux, ASSOCIATION_RESPONSE);
-                            send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
+                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
                         }
                         break;
                     case ASSOCIATION_REQUEST: // associated
@@ -562,7 +562,7 @@ void mac_task(void *pvParameters)
                             ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
                             update_conection(connection_aux, CONNECTED);
                             update_communication_state(connection_aux, SEND_MESSAGE_DESTINATIONS);
-                            send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
+                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
                         }
                         break;
                     default:
@@ -632,52 +632,81 @@ void mac_task(void *pvParameters)
                 }
             }
         }
-
-        connection_aux = list_connections;
-
-        while (connection_aux != NULL)
+        else
         {
-
-            if (((esp_timer_get_time() - connection_aux->last_transmission) / time_unit) > connection_aux->wait_time_to_send)
-            {
-                send_mensage_mac_protocol(connection_aux);
-                connection_aux->last_transmission = esp_timer_get_time();
-            }
-
-            if (connection_aux->communication_attempts % 3 == 0)
-            {
-                update_wait_time_to_send(connection_aux);
-            }
-
-            if (connection_aux->communication_attempts > max_attempts)
-            {
-                connection_aux = remove_conection(&list_connections, &connection_aux);
-            }
-
-            if (connection_aux != NULL)
-            {
-                connection_aux = connection_aux->next;
-            }
+            ESP_LOGW(TAG, "Erro ao receber pedidos da fila :");
         }
     }
 }
 
-// void send_name(uint8_t *mac_reciver)
-// {
-//     uint8_t mac_frame_data[54];
-//     char name[12] = NOME_ESP;
+void send_probe_request()
+{
+    static uint16_t time_to_sendo_probe_request = 0;
 
-//     memcpy(mac_frame_data, mac_frame_header_template, 24);
-//     mac_frame_data[24] = 0;
-//     mac_frame_data[25] = 0;
-//     mac_frame_data[27] = 0;
-//     mac_frame_data[28] = 0;
+    // time_wait_probe_requenst += wait_time_to_send_probe_request;
+    //  enviando probe request
+    if (time_to_sendo_probe_request == 0)
+    {
+        esp_fill_random(&time_to_sendo_probe_request, 2);
+        time_to_sendo_probe_request = time_to_sendo_probe_request & wait_time_max_probe_request; // cada tick é 1us entao tempo varia de 0us a 65ms
+        ESP_LOGI(TAG, "Sending PROBEREQUEST");
+        set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
+        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
+    }
+    else
+    {
+        time_to_sendo_probe_request--;
+    }
+}
+void mac_send_package(void *pvParameters)
+{
+    while (1)
+    {
+        // Aguardar o semáforo ser liberado// Semafaro liberado pelo timer
+        if (xSemaphoreTake(timer_send_mensage_semaphore, portMAX_DELAY) == pdTRUE)
+        {
+            if (!tx)
+            {
+                ESP_LOGW(TAG, "no transmit function yet");
+                continue;
+            }
+            else
+            {
+               // send_probe_request(); /// envio de probe request
+                current_connections *connection_aux = list_connections;
+                //  uint8_t quantidade_conexoes = 0;
+                while (connection_aux != NULL)
+                {
+                    // quantidade_conexoes++;
+                    if (connection_aux->wait_time_to_send == 0)
+                    {
+                        uint8_t wait_time_aux;
+                        send_mensage_mac_protocol(connection_aux);
+                        esp_fill_random(&wait_time_aux, 1);
+                        connection_aux->wait_time_to_send = wait_time_aux & wait_time_max_resend_mensage;
+                    }
+                    else
+                    {
+                        connection_aux->wait_time_to_send--;
+                    }
 
-//     memcpy(&mac_frame_data[29], name, 12);
-//     for (int contador = 41; contador < 46; contador++)
-//     {
-//         mac_frame_data[contador] = 0;
-//     }
-//     set_addresses(mac_frame_data, IEEE80211_ACK, mac_reciver);
-//     tx(mac_frame_data, sizeof(mac_frame_data));
-// }
+                    if (connection_aux->communication_attempts > max_attempts)
+                    {
+                        connection_aux = remove_conection(&list_connections, &connection_aux);
+                    }
+
+                    if (connection_aux != NULL)
+                    {
+                        connection_aux = connection_aux->next;
+                    }
+                    // if (connection_aux->communication_attempts % 2 == 0)
+                    // {
+                    //     update_wait_time_to_send(connection_aux);
+                    // }
+                }
+                // ESP_LOGW(TAG, "Quantidade de conexões é %i", quantidade_conexoes);
+            }
+        }
+    }
+    //
+}

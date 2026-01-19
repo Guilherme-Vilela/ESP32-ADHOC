@@ -17,9 +17,18 @@
 #include "hwinit.h"
 
 #define RX_BUFFER_AMOUNT 10
-#define MAC_PROBE_REQUEST {0x0, 0x0, 0x0, 0x0, 0x0, 0x0}
 static const char *TAG = "hardware.c";
 uint8_t module_mac_addr[6]; // MAC DO MEU ESP
+uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+#define WIFI_BSSID_FILTER_ADDR_SLOT_0 _MMIO_ADDR(0x3ff73000)
+#define MAC_CTRL_REG _MMIO_DWORD(0x3ff73cb8)
+
+// Declaração de funções proprietárias (blobs) que vamos usar
+void chip_v7_set_chan_nomac(uint8_t channel, uint8_t unknown);
+void disable_wifi_agc();
+void enable_wifi_agc();
+void tx_pwctrl_background(int a, int b);
 
 inline void write_register(uint32_t address, uint32_t value)
 {
@@ -52,6 +61,12 @@ inline uint32_t read_register(uint32_t address)
 #define MAC_TX_DURATION_BASE _MMIO_ADDR(0x3ff74268)
 #define MAC_TX_DURATION_OS (-0xf)
 
+#define MAC_TX_HT_SIG_BASE _MMIO_ADDR(0x3ff74260)
+#define MAC_TX_HT_SIG_OS (-0xf)
+
+#define MAC_TX_HT_UNKNOWN_BASE _MMIO_ADDR(0x3ff74264)
+#define MAC_TX_HT_UNKNOWN_OS (-0xf)
+
 #define WIFI_DMA_INT_STATUS _MMIO_DWORD(0x3ff73c48)
 #define WIFI_DMA_INT_CLR _MMIO_DWORD(0x3ff73c4c)
 
@@ -70,13 +85,17 @@ inline uint32_t read_register(uint32_t address)
 #define WIFI_MAC_ADDR_SLOT_0 0x3ff73040
 #define WIFI_MAC_ADDR_ACK_ENABLE_SLOT_0 0x3ff73064
 
+#define WIFI_BSSID_FILTER_ADDR_SLOT_0 _MMIO_ADDR(0x3ff73000)
+
+#define MAC_CTRL_REG _MMIO_DWORD(0x3ff73cb8)
+
 typedef struct __attribute__((packed)) dma_list_item
 {
 	uint16_t size : 12;
 	uint16_t length : 12;
 	uint8_t _unknown : 6;
 	uint8_t has_data : 1;
-	uint8_t owner : 1; // What does this mean?
+	uint8_t owner : 1;
 	void *packet;
 	struct dma_list_item *next;
 } dma_list_item;
@@ -84,7 +103,8 @@ typedef struct __attribute__((packed)) dma_list_item
 typedef enum
 {
 	RX_ENTRY,
-	TX_ENTRY
+	TX_ENTRY,
+	CHANGE_CHANNEL_ENTRY
 } hardware_queue_entry_type_t;
 
 typedef struct
@@ -100,11 +120,17 @@ typedef struct
 
 typedef struct
 {
+	uint8_t channel;
+} change_channel_queue_entry_t;
+
+typedef struct
+{
 	hardware_queue_entry_type_t type;
 	union
 	{
 		rx_queue_entry_t rx;
 		tx_queue_entry_t tx;
+		change_channel_queue_entry_t change_channel;
 	} content;
 } hardware_queue_entry_t;
 
@@ -132,9 +158,99 @@ typedef struct
 	bool in_use;
 } tx_hardware_slot_t;
 
-tx_hardware_slot_t tx_slots[TX_SLOT_CNT] = {0};
+tx_hardware_slot_t tx_slots[TX_SLOT_CNT] = {};
 
 uint32_t seqnum = 0;
+
+// --- INICIO DO BLOCO NOVO ---
+
+// Funções para reiniciar o MAC (necessário para troca de canal)
+static void init_mac()
+{
+	MAC_CTRL_REG = MAC_CTRL_REG & 0xffffe800;
+}
+
+static void deinit_mac()
+{
+	MAC_CTRL_REG = MAC_CTRL_REG | 0x17ff;
+	while ((MAC_CTRL_REG & 0x2000) != 0)
+	{
+		// espera desativar
+	}
+}
+
+// Função pública para solicitar troca de canal
+void request_channel_change(uint8_t channel)
+{
+	hardware_queue_entry_t msg;
+	msg.type = CHANGE_CHANNEL_ENTRY;
+	msg.content.change_channel.channel = channel;
+
+	if (xQueueSendToBack(hardware_event_queue, &msg, 0) != pdTRUE)
+	{
+		ESP_LOGE(TAG, "Falha ao enfileirar troca de canal");
+	}
+}
+
+// A lógica física de troca de canal
+static void change_channel_to(uint8_t channel)
+{
+	ESP_LOGI(TAG, "Trocando para canal %d", channel);
+	if (channel < 1 || channel > 14)
+	{
+		ESP_LOGE(TAG, "Canal invalido");
+		return;
+	}
+	deinit_mac();
+	chip_v7_set_chan_nomac(channel, 0);
+	disable_wifi_agc();
+	init_mac();
+	enable_wifi_agc();
+}
+
+// Funções de Filtro BSSID (Correção do Broadcast)
+static void set_enable_bssid_filter(uint8_t slot, bool enable)
+{
+	assert(slot <= 1);
+	if (enable)
+	{
+		*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 9) |= 0x10000;
+	}
+	else
+	{
+		*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 9) &= ~(0x10000);
+	}
+}
+
+static void set_bssid_filter(uint8_t slot, const uint8_t *addr)
+{
+	assert(slot <= 1);
+	// desabilita para atualizar seguro
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 9) &= 0xfffeffff;
+
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2) = addr[0] | addr[1] << 8 | addr[2] << 16 | addr[3] << 24;
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 1) = addr[4] | addr[5] << 8;
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 8) = ~0;
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 9) = 0xffff;
+
+	// habilita
+	*(WIFI_BSSID_FILTER_ADDR_SLOT_0 + slot * 2 + 9) |= 0x10000;
+}
+
+// Habilita recepção de frames que normalmente são filtrados
+void set_some_kind_of_rx_policy(uint8_t slot, bool enable)
+{
+	assert(slot <= 1);
+	if (enable)
+	{
+		*(volatile uint32_t *)(0x3ff730d8 + 4 * slot) |= 0x110;
+	}
+	else
+	{
+		*(volatile uint32_t *)(0x3ff730d8 + 4 * slot) &= ~0x110;
+	}
+}
+// --- FIM DO BLOCO NOVO ---
 
 void log_dma_item(dma_list_item *item)
 {
@@ -222,6 +338,12 @@ static void processTxComplete()
 	{
 		return;
 	}
+	static uint8_t ctr = 0;
+	ctr++;
+	if (ctr % 4 == 0)
+	{
+		tx_pwctrl_background(1, 0);
+	}
 	uint32_t slot = 31 - __builtin_clz(txq_state_complete);
 	// ESP_LOGW(TAG, "slot %lx is now free again", slot);
 	uint32_t clear_mask = 1 << slot;
@@ -249,13 +371,17 @@ void IRAM_ATTR wifi_interrupt_handler(void *args)
 		// TODO handle this with open-source code
 		// wdev_process_panic_watchdog() is the closed-source way to recover from this
 	}
-	volatile bool tmp = false;
-	if (xSemaphoreTakeFromISR(rx_queue_resources, &tmp))
+	BaseType_t high_task_awoken = pdFALSE;
+	if (xSemaphoreTakeFromISR(rx_queue_resources, &high_task_awoken))
 	{
 		hardware_queue_entry_t queue_entry;
 		queue_entry.type = RX_ENTRY;
 		queue_entry.content.rx.interrupt_received = cause;
-		xQueueSendFromISR(hardware_event_queue, &queue_entry, NULL);
+		xQueueSendFromISR(hardware_event_queue, &queue_entry, &high_task_awoken);
+	}
+	if (high_task_awoken == pdTRUE)
+	{
+		portYIELD_FROM_ISR(high_task_awoken);
 	}
 }
 
@@ -348,7 +474,7 @@ void handle_rx_messages(rx_callback rxcb)
 			// The data before contains packet metadata
 			wifi_promiscuous_pkt_t *packet = current->packet;
 			// packet->rx_ctrl.sig_len includes the FCS (4 bytes), but we don't need this
-			
+
 			// call callback of upper layer
 			rxcb(packet);
 
@@ -478,18 +604,24 @@ void wifi_hardware_task(hardware_mac_args *pvParameter)
 	pvParameter->_tx_func_callback(&wifi_hardware_tx_func);
 	ESP_LOGW(TAG, "Starting to receive messages");
 
-	uint8_t mac_listen_probe[6] = MAC_PROBE_REQUEST;
-	set_mac_addr_filter(0, mac_listen_probe);
+	// --- NOVA CONFIGURAÇÃO DE FILTROS (CORREÇÃO BROADCAST) ---
+	ESP_LOGW(TAG, "Configurando Filtros Ad-Hoc...");
+
+	// Slot 0: Broadcast (FF:FF...)
+	set_mac_addr_filter(0, broadcast_mac);
+	set_bssid_filter(0, broadcast_mac);
 	set_enable_mac_addr_filter(0, true);
+	set_enable_bssid_filter(0, true);
+	set_some_kind_of_rx_policy(0, true); // Vital para broadcast subir
 
+	// Slot 1: Unicast (Meu MAC)
 	set_mac_addr_filter(1, module_mac_addr);
+	// Para Ad-Hoc proprietário, aceitamos qualquer BSSID (ou broadcast) no unicast
+	set_bssid_filter(1, broadcast_mac);
 	set_enable_mac_addr_filter(1, true);
-	// acking will only happen if the hardware puts the packet in an RX buffer
-
-	// acking will only happen if the hardware puts the packet in an RX buffer
-
-	uint32_t first_part = read_register(WIFI_MAC_ADDR_SLOT_0 + 4);
-	ESP_LOGW(TAG, "addr_p = %lx %lx", first_part & 0xff, (first_part >> 8) & 0xff);
+	set_enable_bssid_filter(1, true);
+	set_some_kind_of_rx_policy(1, false);
+	// ---------------------------------------------------------
 
 	while (true)
 	{
@@ -499,10 +631,10 @@ void wifi_hardware_task(hardware_mac_args *pvParameter)
 
 			if (queue_entry.type == RX_ENTRY)
 			{
-				
+
 				uint32_t cause = queue_entry.content.rx.interrupt_received;
-				//printf("\n Este é o codigo da interrupção: %x  \n" , );
-				//ESP_LOGW(TAG, "interrupt = 0x%08lx", cause);
+				// printf("\n Este é o codigo da interrupção: %x  \n" , );
+				// ESP_LOGW(TAG, "interrupt = 0x%08lx", cause);
 				if (cause & 0x800)
 				{
 					// Watchdog panic
@@ -540,6 +672,10 @@ void wifi_hardware_task(hardware_mac_args *pvParameter)
 				//  TODO: implement retry
 				transmit_packet(queue_entry.content.tx.packet, queue_entry.content.tx.len);
 				xSemaphoreGive(tx_queue_resources);
+			}
+			else if (queue_entry.type == CHANGE_CHANNEL_ENTRY)
+			{
+				change_channel_to(queue_entry.content.change_channel.channel);
 			}
 			else
 			{

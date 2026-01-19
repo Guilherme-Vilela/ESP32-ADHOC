@@ -1,9 +1,11 @@
 {
     "idf.adapterTargetName": "esp32",
-    "idf.portWin": "COM4",
+    "idf.portWin": "COM3",
     "idf.flashType": "UART",
     "files.associations": {
-        "hardware.h": "c"
+        "hardware.h": "c",
+        "proprietary.h": "c",
+        "mac.h": "c"
     },
     "idf.espIdfPathWin": "C:\\Users\\Guilherme\\esp\\v5.0.1\\esp-idf",
     "idf.toolsPathWin": "C:\\Users\\Guilherme\\.espressif",
