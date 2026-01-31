@@ -1,63 +1,76 @@
+#pragma once
+#include <stdint.h>
 
 typedef enum
 {
-    PROBE_RESPONSE,
-    AUTHENTICATION_REQUEST,
-    AUTHENTICATION_RESPONSE,
-    ASSOCIATION_REQUEST,
-    ASSOCIATION_RESPONSE,
-    CONNECTED
-} openmac_sta_state_t;
+    EVENT_TX_REQUEST,   // App pede envio
+    EVENT_TX_COMPLETE,  // Hardware confirma envio
+    EVENT_TX_HELLO
+} mac_event_type_t;
+
+typedef struct
+{
+    mac_event_type_t type;
+
+    union
+    {
+        // Dados para ENVIO (Vem da App)
+        struct
+        {
+            uint8_t dest_mac[6];
+            uint8_t *payload;
+            uint16_t len;
+        } tx_req;
+
+        // Dados de RETORNO (Vem do Hardware)
+        struct
+        {
+            uint16_t seq_num;
+            bool success; // true = ACK, false = Fail
+        } tx_conf;
+    };
+} mac_event_t;
 
 typedef enum
 {
-    WAIT,
-    SEND_MESSAGE_DESTINATIONS,
-    SEND_MESSAGE_DESTINATIONS_INTEREST,
-    SEND_REQUESTED_MESSAGES_INTEREST,
-    SEND_REQUESTED_MESSAGES,
-    COMPLETE,
-    SEND_1,
-    SEND_2
-} communication_stages;
-
-typedef struct current_connections
+    // Tipos geranciados pelo MAC Layer
+    OPPNET_LINK_DATA = 0x01, // Contém carga útil da aplicação (Hello, Msg, etc)
+    OPPNET_LINK_ACK = 0x06   // Confirmação física de recebimento
+} mac_packet_type_t;
+typedef struct
 {
-    uint8_t mac_adress[6];
-    openmac_sta_state_t status;
-    uint8_t communication_attempts;
-    uint8_t wait_time_to_send;
-    communication_stages communication_state;
-    struct current_connections *next;
-} current_connections;
+    uint16_t len;
+    int8_t rssi;
+    uint8_t *buffer; // Ponteiro para memória alocada dinamicamente
+} mac_rx_item_t;
 
-typedef struct payload_mensages
+typedef struct
 {
-    uint8_t id; // 0
-    // uint64_t time_create;
-    uint8_t destination_mac[6]; // 1-6
-    uint8_t size_of_data;       //        //7
-    uint8_t size_of_path;       //        //8
-    uint8_t size_packet;        // 9
-    uint8_t *data;              // 11 -
-    uint8_t *path_mensage;      // vai virar uma nova estrutura       MAC-TIME/MAC-TIME
-    struct payload_mensages *next;
+    uint8_t dest_mac[6];
+    uint8_t *payload;
+    uint16_t len;
+} mac_tx_request_t;
 
-} payload_mensages;
+typedef struct
+{
+    uint8_t mac[6];
+    uint16_t last_seq_ctrl;
+} neighbor_cache_t;
 
-extern SemaphoreHandle_t timer_send_mensage_semaphore;
-#define time_wait_alarm_send_mensage 10000 // counter of clock
-#define wait_time_max_probe_request 10 //ticks of de alarm clock
-#define wait_time_max_resend_mensage 5 // ticks of alarm clock
-#define frequency_timer 100000 // 100kHz
-#define max_attempts 10                      // 10 tentativas
-#define NOME_ESP "Ola sou NO 2"
-#define ID_ESP 2
+
+
+// esp_err_t openmac_netif_start();
+typedef struct
+{
+    uint8_t type; // 0x01 = HELLO
+    // Futuro: Adicionar carga de bateria, vizinhos conhecidos, etc.
+} oppnet_hello_payload_t;
+
 
 void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet);
 void open_mac_tx_func_callback(tx_func *t);
 
-void mac_task(void *pvParameters);
+void mac_init();
 void mac_send_package(void *pvParameters);
 
-esp_err_t openmac_netif_start();
+extern QueueHandle_t mac_event_queue;

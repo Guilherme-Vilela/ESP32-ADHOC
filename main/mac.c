@@ -1,11 +1,10 @@
-#include "esp_wifi.h" // included for the definition of the wifi_promiscuous_pkt_t struct
-#include "esp_mac.h"  // included for the MAC2STR macro
+#include "esp_wifi.h"
+#include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_netif.h"
 #include "esp_netif_defaults.h"
 #include "esp_random.h"
-
 #include "hardware.h"
 #include "80211.h"
 #include "mac.h"
@@ -14,247 +13,190 @@
 #include "driver/gpio.h"
 #include <string.h>
 
+#include "freertos/FreeRTOS.h" // Núcleo do FreeRTOS
+#include "freertos/task.h"     // Para vTaskDelay, xTaskCreate
+#include "freertos/queue.h"    // Para xQueueCreate
+#include "freertos/timers.h"   //
+
+#define MAC_FMT "%02X:%02X:%02X:%02X:%02X:%02X"
+#define MAC_ARG(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#define MAX_PENDING_PACKETS 5 // Quantos pacotes "voando" ao mesmo tempo
+#define MAX_RETRIES 3
+#define MAX_NEIGHBORS 10
+
+// --- CONFIGURAÇÕES DE BACKOFF ---
+#define SLOT_TIME_US 1000 // 1ms (Tempo base do slot de software)
+#define CW_MIN 15         // Janela inicial (0..15 slots)
+#define CW_MAX 1023       // Janela máxima (0..1023 slots)
+
+// --- BEACON PERIODICO
+uint16_t hello_interval_ms = 5000;
+static TimerHandle_t hello_timer = NULL;
+
 // variaveis globais
-static char *TAG = "mac.c";
-static tx_func *tx = NULL;
-static QueueHandle_t reception_queue = NULL;
-macaddr_t ssid = {'w', 'i', 'f', 'd', 't', 'n'};
-macaddr_t ap_address = {0, 0, 0, 0, 0, 0};
-SemaphoreHandle_t timer_send_mensage_semaphore;
+static const char *TAG = "MAC";
+static tx_func *hardware_tx_func = NULL;
+mac_addr_t bssid = "OPPNET";
+static const char *TAG_DUMP = "MAC_DUMP";
+static const uint8_t MY_OUI[] = {0x02, 0xAA, 0xBB};
+static neighbor_cache_t dedup_cache[MAX_NEIGHBORS];
 
-uint8_t mac_frame_header_template[] = {
-    IEEE80211_FRAME_CONTROL,    // #define IEEE80211_FRAME_CONTROL     0x00, 0x00
-    IEEE80211_DURATION_ID,      // #define IEEE80211_DURATION_ID       0x00, 0x00
-    IEEE80211_RECIVER_ADDR,     // #define IEEE80211_RECIVER_ADDR      0xff, 0xff, 0xff, 0xff, 0xff, 0xff
-    IEEE80211_TRANSMITTER_ADDR, // #define IEEE80211_TRANSMITTER_ADDR  0xff, 0xff, 0xff, 0xff, 0xff, 0xff
-    IEEE80211_BSSID,            // #define IEEE80211_BSSID             0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    IEEE80211_SEQUENCE_CONTROL, // #define IEEE80211_SEQUENCE_CONTROL  0x00, 0x00
-};
-
-current_connections *create_list_current_connections()
+static QueueHandle_t rx_queue_hw_to_mac = NULL; // Fila RX (Hardware -> MAC)
+QueueHandle_t mac_event_queue = NULL;
+// --- FUNÇÃO AUXILIAR: CONSTRÓI E ENVIA FRAME (Genérica) ---
+// Retorna true se o hardware aceitou (colocou na fila), false se fila cheia/erro
+bool build_and_send_frame(uint8_t *dest_mac, uint8_t *payload, uint16_t len, uint16_t seq_num)
 {
-    return NULL;
+
+    // 1. Verificação de Segurança
+    if (!hardware_tx_func)
+    {
+        ESP_LOGE(TAG, "Hardware TX func is NULL");
+        return false;
+    }
+
+    // 2. Cálculo do Tamanho Total
+    // Header Wi-Fi (24) + Vendor Header (5) + Payload Útil (len)
+    // Nota: O FCS (CRC de 4 bytes) é adicionado automaticamente pelo hardware, não alocamos aqui.
+    uint16_t total_len = sizeof(wifi_mac_header_t) + 5 + len;
+
+    // 3. Alocação de Memória Temporária
+    // Precisamos de um buffer contíguo para passar pro driver
+    uint8_t *tx_buf = malloc(total_len);
+    if (!tx_buf)
+    {
+        ESP_LOGE(TAG, "Falha de Malloc no build_frame");
+        return false;
+    }
+
+    // Zera o buffer para evitar lixo de memória
+    memset(tx_buf, 0, total_len);
+
+    // Cast para facilitar o preenchimento usando a struct
+    vendor_action_frame_t *frame = (vendor_action_frame_t *)tx_buf;
+
+    // --- 4. PREENCHIMENTO DO CABEÇALHO 802.11 ---
+
+    // Frame Control: Management (00) / Action (1101 = 13)
+    frame->mac_header.frame_control.protocol_version = 0;
+    frame->mac_header.frame_control.type = 0;    // data
+    frame->mac_header.frame_control.subtype = 13; // 
+    frame->mac_header.frame_control.to_ds = 0;   // Ad-Hoc
+    frame->mac_header.frame_control.from_ds = 0; // Ad-Hoc
+
+    // Endereços
+    memcpy(frame->mac_header.receiver, dest_mac, 6);
+    memcpy(frame->mac_header.transmitter, module_mac_addr, 6); // Definido no hardware.c
+    memcpy(frame->mac_header.bssid, bssid_mac_addr, 6);        // Em Ad-Hoc/Mesh, BSSID geralmente é o destino ou Broadcast
+
+    // Duration (Opcional, geralmente 0 ou tempo para NAV)
+    frame->mac_header.duration_id = 0x0000;
+
+    frame->mac_header.sequence_control.fragment_number = 0;
+    frame->mac_header.sequence_control.sequence_number = seq_num;
+
+    // --- 5. PREENCHIMENTO DO CABEÇALHO VENDOR ---
+    frame->category = 127;              // Vendor Specific Category
+    memcpy(frame->oui, MY_OUI, 3);      // Seu OUI (02:AA:BB)
+    frame->oui_type = OPPNET_LINK_DATA; // 0x01 (Sinaliza que é DADO, não ACK)
+
+    // --- 6. CÓPIA DO PAYLOAD ---
+
+    // O payload começa logo após o cabeçalho vendor.
+    // A struct 'vendor_action_frame_t' tem um membro 'payload[]' flexível no fim.
+    memcpy(frame->payload, payload, len);
+
+    // --- 7. ENVIO PARA O HARDWARE ---
+
+    // Passamos o buffer para a função do driver (que vai copiar para a fila DMA)
+    bool result = hardware_tx_func(tx_buf, total_len);
+
+    // --- 8. LIMPEZA ---
+
+    // Como o hardware_tx_func faz sua própria cópia (malloc interno ou memcpy pro DMA),
+    // nós somos responsáveis por liberar ESTE buffer temporário aqui.
+    free(tx_buf);
+
+    return result;
 }
-payload_mensages *create_list_payload_mensages()
+
+/**
+ * @brief Decodifica e imprime o frame recebido para debug
+ * @param packet Ponteiro para o pacote promiscuo recebido do driver
+ */
+void print_wifi_frame(wifi_promiscuous_pkt_t *packet)
 {
-    return NULL;
-}
+    // 1. Acesso aos Metadados do Rádio (RSSI, Tamanho, etc)
+    wifi_pkt_rx_ctrl_t *ctrl = &packet->rx_ctrl;
 
-current_connections *insert_current_connections(current_connections *head, uint8_t mac[6], uint8_t state)
-{
-    current_connections *new_conection = malloc(sizeof(current_connections));
-    current_connections *item = head;
+    // 2. Cast do Payload bruto para sua Union inteligente
+    mac80211_frame *frame = (mac80211_frame *)packet->payload;
 
-    memcpy(new_conection->mac_adress, mac, 6);
-    new_conection->status = state;
-    new_conection->next = NULL;
-    new_conection->communication_attempts = 0;
-    // new_conection->last_transmission = 0;
-    new_conection->communication_state = WAIT;
-    new_conection->wait_time_to_send = 0;
-    // while (new_conection->wait_time_to_send > 750 || new_conection->wait_time_to_send < 500)
-    // {
-    //     esp_fill_random(&new_conection->wait_time_to_send, 2);
-    // }
+    // Cabeçalho Básico
+    ESP_LOGI(TAG_DUMP, "=== WI-FI FRAME START ===");
+    ESP_LOGI(TAG_DUMP, "PHY Info: RSSI=%d dBm, Rate=%d, Chan=%d, Len=%d",
+             ctrl->rssi, ctrl->rate, ctrl->channel, ctrl->sig_len);
 
-    if (head == NULL)
+    // 3. Decodificando o Frame Control (Bit Fields)
+    // Nota: Acesso via 'std' pois o cabeçalho é comum
+    mac_frame_control_t *fc = &frame->std.mac_header.frame_control;
+
+    ESP_LOGI(TAG_DUMP, "Header: Type=%d (0=Mgt,1=Ctrl,2=Data), Subtype=%d",
+             fc->type, fc->subtype);
+
+    ESP_LOGI(TAG_DUMP, "Flags: ToDS=%d, FromDS=%d, Retry=%d, PwrMgt=%d",
+             fc->to_ds, fc->from_ds, fc->retry, fc->pwr_mgt);
+
+    // 4. Endereços
+    ESP_LOGI(TAG_DUMP, "Addrs: Dest=[" MAC_FMT "] Src=[" MAC_FMT "] BSS=[" MAC_FMT "]",
+             MAC_ARG(frame->std.mac_header.receiver),
+             MAC_ARG(frame->std.mac_header.transmitter),
+             MAC_ARG(frame->std.mac_header.bssid));
+
+    // 5. Lógica de Detecção de Action Frame Vendor Specific
+    // Type 0 (Management) e Subtype 13 (Action)
+    if (fc->type == 0 && fc->subtype == 13)
     {
-        return new_conection;
-    }
 
-    while (item->next != NULL)
-    {
-        item = item->next;
-    }
-    item->next = new_conection;
+        // Acessamos via máscara 'vendor' agora
+        uint8_t category = frame->vendor.category;
 
-    return head;
-}
-payload_mensages *create_payload_mensage(payload_mensages *head, uint8_t mac[6], uint8_t *mensage_to_send, uint8_t size_of_mensage)
-{
-    payload_mensages *new_mensage = malloc(sizeof(payload_mensages));
-    payload_mensages *item = head;
-    uint8_t *path = malloc(7);
-    memcpy(path, module_mac_addr, 6);
-    path[7] = '/';
-
-    new_mensage->id = 0x65;
-    // new_mensage->time_create = esp_timer_get_time();
-    memcpy(new_mensage->destination_mac, mac, 6);
-    new_mensage->size_of_data = size_of_mensage; // size max 1500 bytes -mac frame header
-    new_mensage->size_of_path = 7;
-
-    new_mensage->data = mensage_to_send;
-
-    new_mensage->path_mensage = path; // vai virar uma nova estrutura       MAC1/MAC2
-    new_mensage->next = NULL;
-    new_mensage->size_packet = new_mensage->size_of_data + new_mensage->size_of_path + 10;
-    if (head == NULL)
-    {
-        return new_mensage;
-    }
-
-    while (item->next != NULL)
-    {
-        item = item->next;
-    }
-    item->next = new_mensage;
-
-    return head;
-}
-payload_mensages *insert_payload_mensage(payload_mensages *head, uint8_t *mensage_received)
-{
-    payload_mensages *new_mensage = malloc(sizeof(payload_mensages));
-    payload_mensages *item = head;
-
-    memcpy(&new_mensage->id, mensage_received, 1);
-    // memcpy(&new_mensage->time_create, 1 + mensage_received, 8);
-    memcpy(new_mensage->destination_mac, 1 + mensage_received, 6);
-    memcpy(&new_mensage->size_of_data, 7 + mensage_received, 1);
-    memcpy(&new_mensage->size_of_path, 8 + mensage_received, 1);
-    // memcpy(&new_mensage->size_packet, 9 + mensage_received, 1);
-    new_mensage->size_packet = 0x41;
-    ESP_LOGW(TAG, "tamnho mensagem : %x", new_mensage->size_of_data);
-    ESP_LOGW(TAG, "caminho : %x", new_mensage->size_of_path);
-    ESP_LOGW(TAG, "tamanho pacote : %x", new_mensage->size_packet);
-    uint8_t *mensage_data_received = malloc(new_mensage->size_of_data);
-    uint8_t *mensage_path_received = malloc(new_mensage->size_of_path);
-
-    memcpy(mensage_data_received, 10 + mensage_received, new_mensage->size_of_data);
-    memcpy(mensage_path_received, (10 + new_mensage->size_of_data) + mensage_received, new_mensage->size_of_path);
-
-    new_mensage->data = mensage_data_received;
-    new_mensage->path_mensage = mensage_data_received;
-    new_mensage->next = NULL;
-
-    if (head == NULL)
-    {
-        return new_mensage;
-    }
-
-    while (item->next != NULL)
-    {
-        item = item->next;
-    }
-    item->next = new_mensage;
-    ESP_LOGW(TAG, "NOVA CONEXAO CRIADA");
-    return head;
-}
-payload_mensages *remove_mensage(payload_mensages **head, payload_mensages **connection_removed)
-{
-    payload_mensages *item = *head;
-    payload_mensages *previous_item = NULL;
-    ESP_LOGD(TAG, "APAGANDO A CONEXÃO");
-    while (item != NULL && item != *connection_removed)
-    {
-        previous_item = item;
-        item = item->next;
-    }
-    free(item->data);
-    free(item->path_mensage);
-    if (item != NULL)
-    {
-        if (previous_item == NULL)
+        if (category == 127)
         {
-            *head = item->next;
-            previous_item = item->next;
+            ESP_LOGW(TAG_DUMP, ">>> VENDOR SPECIFIC ACTION DETECTED <<<");
+            ESP_LOGI(TAG_DUMP, "Category: %d (Vendor)", category);
+            ESP_LOGI(TAG_DUMP, "OUI: %02X:%02X:%02X",
+                     frame->vendor.oui[0], frame->vendor.oui[1], frame->vendor.oui[2]);
+            ESP_LOGI(TAG_DUMP, "Protocol Version: 0x%02X", frame->vendor.oui_type);
+
+            // Cálculo do Payload da Aplicação
+            // Tamanho Total - (Header WiFi 24b + Vendor Header 5b + FCS 4b)
+            int header_size = sizeof(wifi_mac_header_t) + 5; // 24 + 5 = 29 bytes
+            int fcs_size = 4;
+            int payload_len = ctrl->sig_len - header_size - fcs_size;
+
+            if (payload_len > 0)
+            {
+                ESP_LOGI(TAG_DUMP, "OppNet Payload (%d bytes):", payload_len);
+                ESP_LOG_BUFFER_HEX(TAG_DUMP, frame->vendor.payload, payload_len);
+            }
+            else
+            {
+                ESP_LOGW(TAG_DUMP, "Empty Payload");
+            }
         }
         else
         {
-            previous_item->next = item->next;
+            ESP_LOGI(TAG_DUMP, "Action Frame (Standard Category: %d)", category);
         }
-        free(item);
     }
-    return previous_item;
-}
-
-current_connections *list_connections;
-payload_mensages *list_mensages;
-
-void update_conection(current_connections *connection, uint8_t state)
-{
-    connection->status = state;
-    connection->communication_attempts = 0;
-    connection->wait_time_to_send = 0;
-}
-void update_communication_state(current_connections *connection, communication_stages state)
-{
-    connection->communication_state = state;
-    connection->communication_attempts = 0;
-}
-
-current_connections *search_conection(current_connections *head, uint8_t mac[6])
-{
-    current_connections *item = head;
-    while (item != NULL && memcmp(item->mac_adress, mac, 6))
+    else
     {
-        item = item->next;
-    }
-    return item;
-}
-
-current_connections *remove_conection(current_connections **head, current_connections **connection_removed)
-{
-    current_connections *item = *head;
-    current_connections *previous_item = NULL;
-    ESP_LOGD(TAG, "APAGANDO A CONEXÃO");
-    while (item != NULL && item != *connection_removed)
-    {
-        previous_item = item;
-        item = item->next;
+        ESP_LOGD(TAG_DUMP, "Not an Action Frame (Ignored for OppNet)");
     }
 
-    if (item != NULL)
-    {
-        if (previous_item == NULL)
-        {
-            *head = item->next;
-            previous_item = item->next;
-        }
-        else
-        {
-            previous_item->next = item->next;
-        }
-        free(item);
-    }
-    return previous_item;
+    ESP_LOGI(TAG_DUMP, "=== WI-FI FRAME END ===\n");
 }
-
-int search_mac(current_connections *head, uint8_t mac[6])
-{
-    current_connections *item = head;
-    if (item != NULL)
-    {
-        while (memcmp(item->mac_adress, mac, 6) && item != NULL)
-        {
-            item = item->next;
-        }
-        if (item != NULL)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-void build_frame(uint8_t *frame, uint8_t *ra, uint8_t *ta, uint8_t *bssid)
-{
-    // set receiver address
-    memcpy(&frame[4], ra, 6);
-    // set transmitter address
-    memcpy(&frame[10], ta, 6);
-    // set bssid
-    memcpy(&frame[16], bssid, 6);
-}
-
-void set_addresses(uint8_t *frame, uint8_t first_byte_frame_control, uint8_t *ra)
-{
-    // set first_byte frame control
-    frame[0] = first_byte_frame_control;
-
-    // set receiver address
-    memcpy(&frame[4], ra, 6);
-}
-
 void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
 {
     // Gets called with a packet that was received. This function does not need to free the memory of the packet,
@@ -262,46 +204,62 @@ void open_mac_rx_callback(wifi_promiscuous_pkt_t *packet)
     //  better copy it before returning!
     // Please avoid doing heavy processing here: it's not in an interrupt, but if this function is not fast enough,
     // the RX queue that is used to pass packets to this function might overflow and drop packets.
-
-    mac80211_frame *p = (mac80211_frame *)packet->payload;
-    uint8_t mac_listen_probe_request[6] = MAC_PROBE_REQUEST;
-    // printf("\n DADO RECEBIDO :");
-    // for (int contador = 0; contador < 24; contador++)
-    // {
-    //     printf(" %x ", packet->payload[contador]);
-    // }
-    // printf("\n\n");
-
-    // uint8_t value = packet->payload[0];
-    // p->frame_control.sub_type = value & 0b00001111;
-    // p->frame_control.type = ((value & 0b00110000) >> 4);
-    // p->frame_control.protocol_version = ((value & 0b11000000) >> 6);
-    // ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11  ", packet->payload, packet->rx_ctrl.sig_len - 4, ESP_LOG_INFO);
-
-    // ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
-    // ESP_LOGW(TAG, "SUBTIPO : %x", p->frame_control.sub_type);
-    // ESP_LOGW(TAG, "TAMANHO DA MENSAGEM : %i", packet->rx_ctrl.sig_len);
-    //  check that receiver mac address matches our mac address or is broadcast
-    if ((memcmp(module_mac_addr, p->receiver_address, 6)) && (memcmp(mac_listen_probe_request, p->receiver_address, 6)))
-    { //&& (memcmp(BROADCAST_MAC, p->receiver_address, 6))
-        // We're not interested in this packet, return early to avoid having to copy it further to the networking stack
-        ESP_LOGD(TAG, "Discarding packet from " MACSTR " to " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
+    print_wifi_frame(packet);
+    if (packet->rx_ctrl.sig_len < 29)
+    {
         return;
     }
-    // verificação de probe request
-    // ESP_LOGI(TAG, "Accepted: from " MACSTR " to " MACSTR " type=%d, subtype=%d from_ds=%d to_ds=%d", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address), p->frame_control.type, p->frame_control.sub_type, p->frame_control.from_ds, p->frame_control.to_ds);
 
-    if (!reception_queue)
+    mac80211_frame *frame = (mac80211_frame *)packet->payload;
+    // --- FILTRO NÍVEL 2: Frame Control (0x00D0) ---
+    // Verifica se é Management (Type 0) e Action (Subtype 13)
+    // 0x00D0 em Little Endian significa:
+    // Byte 0: 0xD0 (Bits: Ver=00, Type=00, Subtype=1101 -> 13)
+    // Byte 1: 0x00 (Flags zeradas)
+    if (frame->raw_frame_control != 0x00D0)
     {
-        ESP_LOGI(TAG, "Received, but queue does not exist yet");
+        return; // Não é Action Frame, tchau.
+    }
+
+    // --- FILTRO NÍVEL 3: Categoria Vendor (127) ---
+    // Acessamos direto da memória do hardware. É seguro ler.
+    if (frame->vendor.category != 127)
+    {
+        return; // É Action, mas não é Vendor (pode ser QoS, BlockAck, etc).
+    }
+
+    // --- FILTRO NÍVEL 4: OUI (Identidade) ---
+    // Verifica se os 3 bytes de OUI batem com o nosso.
+    // Isso garante que não pegaremos pacotes Vendor de outros fabricantes.
+    if (memcmp(frame->vendor.oui, MY_OUI, 3) != 0)
+    {
+        return; // É Vendor, mas não é o nosso.
+    }
+
+    uint32_t total_len = packet->rx_ctrl.sig_len;
+    uint8_t *safe_copy = malloc(total_len);
+
+    if (safe_copy == NULL)
+    {
+        ESP_LOGE(TAG, "Sem memória para copiar pacote RX!");
         return;
     }
-    // 28 is size of rx_ctrl, 4 is size of FCS (which we don't need)
-    wifi_promiscuous_pkt_t *packet_queue_copy = malloc(packet->rx_ctrl.sig_len + 24);
-    memcpy(packet_queue_copy, packet, packet->rx_ctrl.sig_len + 24);
-    if (!(xQueueSendToBack(reception_queue, &packet_queue_copy, 0)))
+
+    // Copia do DMA para a Heap
+    memcpy(safe_copy, packet->payload, total_len);
+
+    // Prepara o item para a fila
+    mac_rx_item_t item;
+    item.buffer = safe_copy;
+    item.len = total_len;
+    item.rssi = packet->rx_ctrl.rssi;
+
+    // Envia para a Task MAC (Core 1)
+    if (xQueueSend(rx_queue_hw_to_mac, &item, 0) != pdTRUE)
     {
-        ESP_LOGW(TAG, "MAC RX queue full!");
+        // Se a fila encheu (a Task MAC está lenta), descartamos para não travar
+        free(safe_copy);
+        // Opcional: Contar estatística de packet drop
     }
 }
 
@@ -310,403 +268,333 @@ void open_mac_tx_func_callback(tx_func *t)
     // This function will get called exactly once, with as argument a function (`bool tx_func(uint8_t* packet, uint32_t len)`).
     // The function that is passed will TX packets. If it returned `true`, that means that the packet was sent. If false,
     //  you'll need to call the function again.
-    tx = t;
+    hardware_tx_func = t;
 }
 
-void send_mensages(current_connections *connection)
+void send_link_ack(uint8_t *dest_mac, uint16_t seq_num_to_ack)
 {
-    // 0
-    // 0x31 dados
-    // 0x32 confirmacao
-    // 0x33 esperando
-    // 0x34 sem dados
-    uint8_t mac_frame_data[30];
-    switch (connection->communication_state)
+    if (!hardware_tx_func)
+        return;
+
+    // Tamanho: Header(24) + Vendor(5) = 29 bytes (Sem payload)
+    uint16_t total_len = sizeof(wifi_mac_header_t) + 5;
+    uint8_t *buf = malloc(total_len);
+    if (!buf)
+        return;
+
+    vendor_action_frame_t *frame = (vendor_action_frame_t *)buf;
+    memset(buf, 0, total_len);
+
+    // Configura Header
+    frame->mac_header.frame_control.type = 0;     // Mgt
+    frame->mac_header.frame_control.subtype = 13; // Action
+    memcpy(frame->mac_header.receiver, dest_mac, 6);
+    memcpy(frame->mac_header.transmitter, module_mac_addr, 6);
+    memcpy(frame->mac_header.bssid, dest_mac, 6);
+
+    // Configura Vendor Action
+    frame->category = 127;
+    memcpy(frame->oui, MY_OUI, 3);
+    frame->oui_type = 0x06; // TIPO 0x06 = ACK
+
+    frame->mac_header.sequence_control.fragment_number = 0;
+    frame->mac_header.sequence_control.sequence_number = seq_num_to_ack;
+
+    hardware_tx_func(buf, total_len);
+    free(buf);
+}
+
+// Função auxiliar para verificar duplicata
+bool is_duplicate(uint8_t *src_mac, uint16_t seq_ctrl)
+{
+    for (int i = 0; i < MAX_NEIGHBORS; i++)
     {
-
-    case SEND_MESSAGE_DESTINATIONS:
-        if (list_mensages != NULL)
+        // Se achou o vizinho na cache
+        if (memcmp(dedup_cache[i].mac, src_mac, 6) == 0)
         {
-            ESP_LOGW(TAG, "enviadno mensagem");
-            connection->communication_state = SEND_MESSAGE_DESTINATIONS;
-
-            uint16_t size_packet_to_send = 29 + list_mensages->size_packet;
-            uint16_t size_mensage_and_header = 35 + list_mensages->size_of_data;
-            uint8_t mac_frame_data2[size_packet_to_send];
-
-            memcpy(mac_frame_data2, mac_frame_header_template, 24);
-            mac_frame_data2[24] = 0x31;
-
-            memcpy(&mac_frame_data2[25], list_mensages, 10);
-            memcpy(&mac_frame_data2[35], list_mensages->data, list_mensages->size_of_data);
-            memcpy(&mac_frame_data2[size_mensage_and_header], list_mensages->path_mensage, list_mensages->size_of_path);
-
-            for (int i = 0; i < 2; i++)
+            // Se o numero de sequencia é o mesmo, é duplicata!
+            if (dedup_cache[i].last_seq_ctrl == seq_ctrl)
             {
-                mac_frame_data2[size_packet_to_send - i] = 0xFF;
+                return true;
             }
-
-            set_addresses(mac_frame_data2, IEEE80211_ACK, connection->mac_adress);
-            tx(mac_frame_data2, sizeof(mac_frame_data2));
+            // Atualiza o numero e retorna false (não é duplicata, é novo)
+            dedup_cache[i].last_seq_ctrl = seq_ctrl;
+            return false;
         }
-        else
-        {
-            memcpy(mac_frame_data, mac_frame_header_template, 24);
-            mac_frame_data[24] = 0x34;
-
-            for (int i = 0; i < 4; i++)
-            {
-                mac_frame_data[28 - i] = 0xFF;
-            }
-
-            set_addresses(mac_frame_data, IEEE80211_ACK, connection->mac_adress);
-            tx(mac_frame_data, sizeof(mac_frame_data));
-        }
-        break;
-
-    case COMPLETE:
-
-        memcpy(mac_frame_data, mac_frame_header_template, 24);
-        mac_frame_data[24] = 0x32;
-
-        for (int i = 0; i < 4; i++)
-        {
-            mac_frame_data[28 - i] = 0xFF;
-        }
-
-        set_addresses(mac_frame_data, IEEE80211_ACK, connection->mac_adress);
-        tx(mac_frame_data, sizeof(mac_frame_data));
-        // connection->wait_time_to_send = 5000;
-        break;
-
-    default:
-        memcpy(mac_frame_data, mac_frame_header_template, 24);
-        mac_frame_data[24] = 0x33;
-
-        for (int i = 0; i < 4; i++)
-        {
-            mac_frame_data[28 - i] = 0xFF;
-        }
-
-        set_addresses(mac_frame_data, IEEE80211_ACK, connection->mac_adress);
-        tx(mac_frame_data, sizeof(mac_frame_data));
-        break;
     }
+    // Se não achou (vizinho novo), adiciona na cache (lógica simplificada: overwrite index 0)
+    // Numa implementação real, use LRU ou Ring Buffer
+    static int next_idx = 0;
+    memcpy(dedup_cache[next_idx].mac, src_mac, 6);
+    dedup_cache[next_idx].last_seq_ctrl = seq_ctrl;
+    next_idx = (next_idx + 1) % MAX_NEIGHBORS;
+
+    return false;
 }
 
-void send_mensage_mac_protocol(current_connections *connection)
+void mac_rx_task(void *pvParam)
 {
-    connection->communication_attempts++;
-    switch (connection->status)
+    mac_rx_item_t item;
+    ESP_LOGI(TAG, "RX Task Iniciada (Modo Hardware ACK)");
+
+    while (1)
     {
-    case PROBE_RESPONSE:
-        ESP_LOGI(TAG, "Sending PROBE RESPONSE");
-        set_addresses(mac_frame_header_template, IEEE80211_PROBE_RESPONSE, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-    case AUTHENTICATION_REQUEST:
-        ESP_LOGI(TAG, "Sending authentication Request!");
-        set_addresses(mac_frame_header_template, IEEE80211_AUTHENTICATION, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-    case AUTHENTICATION_RESPONSE:
-        ESP_LOGI(TAG, "Sending authentication response!");
-        set_addresses(mac_frame_header_template, IEEE80211_AUTHENTICATION, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-    case ASSOCIATION_REQUEST:
-        ESP_LOGI(TAG, "Sending association request frame!");
-        set_addresses(mac_frame_header_template, IEEE80211_ASSOCIATION_REQ, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-    case ASSOCIATION_RESPONSE:
-        ESP_LOGI(TAG, "Sending association response frame!");
-        set_addresses(mac_frame_header_template, IEEE80211_ASSOCIATION_RESP, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-    case CONNECTED:
-        ESP_LOGI(TAG, "ACK !");
-        // send_mensages(connection);
-        set_addresses(mac_frame_header_template, IEEE80211_ACK, connection->mac_adress);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
-        break;
-
-    default:
-        break;
-    }
-}
-void mac_task(void *pvParameters)
-{
-    list_connections = create_list_current_connections();
-    list_mensages = create_list_payload_mensages();
-
-    current_connections *connection_aux = NULL;
-
-    build_frame(mac_frame_header_template, ap_address, module_mac_addr, ssid);
-
-    ESP_LOGI(TAG, "Starting mac_task, running on %d", xPortGetCoreID());
-
-    reception_queue = xQueueCreate(10, sizeof(wifi_promiscuous_pkt_t *));
-    assert(reception_queue);
-    wifi_promiscuous_pkt_t *packet;
-    while (true)
-    {
-
-        // TRATAMENTO DE MENSAGEM
-        if (xQueueReceive(reception_queue, &packet, portMAX_DELAY) == pdPASS)
+        if (xQueueReceive(rx_queue_hw_to_mac, &item, portMAX_DELAY))
         {
-            mac80211_frame *p = (mac80211_frame *)packet->payload;
-            uint8_t value = packet->payload[0];
+            mac80211_frame *frame = (mac80211_frame *)item.buffer;
 
-            ESP_LOG_BUFFER_HEXDUMP("netif-rx 802.11 DADO RECEBIDO ", packet->payload, packet->rx_ctrl.sig_len, ESP_LOG_INFO);
+            uint8_t *sender_mac = frame->vendor.mac_header.transmitter;
+            uint8_t type = frame->vendor.oui_type;
+            uint16_t seq = frame->vendor.mac_header.sequence_control.sequence_number;
 
-            p->frame_control.sub_type = value & 0b00001111;
-            p->frame_control.type = ((value & 0b00110000) >> 4);
-            p->frame_control.protocol_version = ((value & 0b11000000) >> 6);
-
-            ESP_LOGW(TAG, "TIPO : %x", p->frame_control.type);
-
-            ESP_LOGW(TAG, "SUBTIPO : %x", p->frame_control.sub_type);
-            switch (p->frame_control.sub_type)
+            // Filtro de Duplicatas (Essencial pois o HW pode retransmitir)
+            if (!is_duplicate(sender_mac, seq))
             {
-            case IEEE80211_TYPE_MGT_SUBTYPE_BEACON:
-                ESP_LOGW(TAG, "BEACON ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_ACTION:
-                ESP_LOGW(TAG, "ACTION ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_PROBE_REQ:
-                ESP_LOGW(TAG, "PROBE_REQ ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP:
-                ESP_LOGW(TAG, "PROBE RESP ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION:
-                ESP_LOGW(TAG, "AUTH ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_DEAUTHENTICATION:
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_REQ:
-                ESP_LOGW(TAG, "ASSOC REQ ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_RESP:
-                ESP_LOGW(TAG, "ASSOC RESPONSE ");
-                break;
-            case IEEE80211_TYPE_MGT_SUBTYPE_DISASSOCIATION:
-                break;
-            default:
-                break;
-            }
-
-            ESP_LOGW(TAG, "TAMANHO DA MENSAGEM : %i", packet->rx_ctrl.sig_len);
-            ESP_LOGW(TAG, "DADO ENVIADO POR : " MACSTR "\n", MAC2STR(p->transmitter_address));
-
-            connection_aux = search_conection(list_connections, p->transmitter_address);
-
-            // verifica se a conexão existe
-            if (connection_aux == NULL)
-            { // se o mac ainda nao esta na lsita de conexões
-                if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_REQ)
+                if (type == OPPNET_LINK_DATA)
                 {
-                    list_connections = insert_current_connections(list_connections, p->transmitter_address, PROBE_RESPONSE);
+                    // NÃO ENVIAMOS ACK AQUI (Hardware já enviou)
+
+                    ESP_LOGI(TAG, "RX Dados de " MAC_FMT " (Seq %d)", MAC_ARG(sender_mac), seq);
+
+                    // Extrai Payload para a Aplicação
+                    int overhead = sizeof(wifi_mac_header_t) + 5 + 4;
+                    int payload_len = item.len - overhead;
+
+                    if (payload_len > 0)
+                    {
+                        // Exemplo: xQueueSend(oppnet_queue, ...);
+                        ESP_LOG_BUFFER_HEX("PAYLOAD", frame->vendor.payload, payload_len);
+                    }
                 }
-                else if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP)
-                {
-                    list_connections = insert_current_connections(list_connections, p->transmitter_address, AUTHENTICATION_REQUEST);
-                }
+                // Se recebermos um ACK (0x06), apenas ignoramos, pois usamos HW ACK agora.
             }
             else
             {
-                // if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP && connection_aux->status == PROBE_RESPONSE)
-                // {
-                //     update_conection(connection_aux, AUTHENTICATION_REQUEST);
-                //     ESP_LOGI(TAG, "Passando para etapa de autenticação");
-                // }
-                if (p->frame_control.type == IEEE80211_TYPE_MGT)
-                {
-                    switch (connection_aux->status)
-                    {
-                    case PROBE_RESPONSE: // WAIT PACK AUTH REQUEST
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION)
-                        {
-                            ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
-                            update_conection(connection_aux, AUTHENTICATION_RESPONSE);
-                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        }
-                        // else if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_PROBE_RESP)
-                        // {
-                        //     ESP_LOGW(TAG, "Authentication received from=" MACSTR " to= " MACSTR "\n\n", MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
-                        //     update_conection(connection_aux, AUTHENTICATION_RESPONSE);
-                        //     // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        // }
-                        break;
-                    case AUTHENTICATION_REQUEST: // WAIT PACK AUTH RESPONSE
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_AUTHENTICATION)
-                        {
-                            ESP_LOGW(TAG, "Authentication response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
-                            update_conection(connection_aux, ASSOCIATION_REQUEST);
-                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        }
-                        break;
-                    case AUTHENTICATION_RESPONSE: // authenticated, wait for association response packet
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_REQ)
-                        {
-                            ESP_LOGW(TAG, "Association request received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
-                            update_conection(connection_aux, ASSOCIATION_RESPONSE);
-                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        }
-                        break;
-                    case ASSOCIATION_REQUEST: // associated
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_ASSOCIATION_RESP)
-                        {
-                            ESP_LOGW(TAG, "Association response received from=" MACSTR " to= " MACSTR, MAC2STR(p->transmitter_address), MAC2STR(p->receiver_address));
-                            update_conection(connection_aux, CONNECTED);
-                            update_communication_state(connection_aux, SEND_MESSAGE_DESTINATIONS);
-                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        }
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                else if (p->frame_control.type == IEEE80211_TYPE_CTL)
-                {
-                    switch (connection_aux->status)
-                    {
-                    case CONNECTED: //
-                        // ESP_LOGW(TAG, "COMANDO : %i \n", packet->payload[49]);
-                        ESP_LOGW(TAG, "DADO  : %x \n", packet->payload[24]);
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_CTL_SUBTYPE_ACK)
-                        {
-                            update_conection(connection_aux, CONNECTED);
-                            // 4 sem dados
-                            // 1 dados
-                            // 2 confirmacao
-                            // 3 esperando
-                            switch (packet->payload[24])
-                            {
-                            case 0x34:
-                                if (connection_aux->communication_state == WAIT)
-                                    update_communication_state(connection_aux, SEND_MESSAGE_DESTINATIONS);
-                                else if (connection_aux->communication_state == SEND_MESSAGE_DESTINATIONS)
-                                    update_communication_state(connection_aux, COMPLETE);
-                                break;
-                            case 0x31:
-                                if (connection_aux->communication_state == WAIT)
-                                {
-                                    gpio_set_level(19, 1);
-                                    update_communication_state(connection_aux, SEND_MESSAGE_DESTINATIONS);
-                                    list_mensages = insert_payload_mensage(list_mensages, &packet->payload[25]);
-                                    ESP_LOG_BUFFER_HEXDUMP("MENSAGEM MONTADA", list_mensages, list_mensages->size_packet, ESP_LOG_INFO);
-                                }
-                                // SALVA
-                                else if (connection_aux->communication_state == SEND_MESSAGE_DESTINATIONS)
-                                {
-                                    gpio_set_level(19, 1);
-                                    update_communication_state(connection_aux, COMPLETE);
-                                    list_mensages = insert_payload_mensage(list_mensages, &packet->payload[25]);
-                                    ESP_LOG_BUFFER_HEXDUMP("MENSAGEM MONTADA", list_mensages, list_mensages->size_packet, ESP_LOG_INFO);
-                                    // SALVA
-                                }
-                                break;
-                            case 0x32:
-                                if (connection_aux->communication_state == SEND_MESSAGE_DESTINATIONS)
-                                    update_communication_state(connection_aux, COMPLETE);
-                                break;
-                            default:
-                                break;
-                            }
-                            // send_mensage_mac_protocol(connection_aux); // RESPONDE AS SOLICITAÇÕES DE IMEDIADO //CUIDAR PARA NAO SOBRECARREGAR
-                        }
-                        break;
-                    case ASSOCIATION_RESPONSE: //
-                        if (p->frame_control.sub_type == IEEE80211_TYPE_CTL_SUBTYPE_ACK)
-                        {
-                            update_conection(connection_aux, CONNECTED);
-                        }
-                        break;
-
-                    default:
-                        break;
-                    }
-                }
+                // ESP_LOGW(TAG, "Duplicata Dropada Seq %d", seq);
             }
-        }
-        else
-        {
-            ESP_LOGW(TAG, "Erro ao receber pedidos da fila :");
+
+            free(item.buffer);
         }
     }
 }
 
-void send_probe_request()
+uint32_t calculate_backoff(uint8_t retry_count)
 {
-    static uint16_t time_to_sendo_probe_request = 0;
 
-    // time_wait_probe_requenst += wait_time_to_send_probe_request;
-    //  enviando probe request
-    if (time_to_sendo_probe_request == 0)
+    // 1. Calcula o tamanho da janela (CW)
+    // A cada retry, deslocamos 1 bit p/ esquerda (multiplica por 2)
+    // Ex: retry 0 -> (15 << 0) = 15
+    //     retry 1 -> (15 << 1) = 30
+    //     retry 2 -> (15 << 2) = 60
+    uint32_t cw = CW_MIN << retry_count;
+
+    // 2. Trava no limite máximo (Clamp)
+    if (cw > CW_MAX)
+        cw = CW_MAX;
+
+    // 3. Escolhe um slot aleatório dentro da janela [0 .. cw]
+    // esp_random() retorna uint32_t. O operador % pega o resto da divisão.
+    uint32_t random_slots = esp_random() % (cw + 1);
+
+    // 4. Converte slots para tempo (us)
+    return random_slots * SLOT_TIME_US;
+}
+
+void enviar_teste_unicast()
+{
+    // 1. Definir o Destino (O usuário passou 4 bytes, adicionei 00 00 para completar 6)
+    // MAC Alvo: 24:DC:FF:54:00:00
+    uint8_t target_mac[6] = {0x24, 0xDC, 0xc3, 0x98, 0x96, 0xb4}; // sem ena
+    
+    //uint8_t target_mac[6] = {0xcc, 0xdb, 0xa7, 0x1d, 0xfc, 0x1c};// com enable
+    // 2. Preparar o Payload
+    const char *mensagem = "Teste de Unicast OppNet";
+    uint16_t len = strlen(mensagem);
+
+    // 3. ALOCAR MEMÓRIA (Crucial! A mac_tx_task vai dar free nisso depois)
+    uint8_t *payload_buffer = (uint8_t *)malloc(len);
+    if (payload_buffer == NULL)
     {
-        esp_fill_random(&time_to_sendo_probe_request, 2);
-        time_to_sendo_probe_request = time_to_sendo_probe_request & wait_time_max_probe_request; // cada tick é 1us entao tempo varia de 0us a 65ms
-        ESP_LOGI(TAG, "Sending PROBEREQUEST");
-        set_addresses(mac_frame_header_template, IEEE80211_PROBE_REQUEST, ap_address);
-        tx(mac_frame_header_template, sizeof(mac_frame_header_template));
+        ESP_LOGE("APP", "Sem memoria para payload");
+        return;
+    }
+    memcpy(payload_buffer, mensagem, len);
+
+    // 4. Montar o Evento
+    mac_event_t evt;
+    evt.type = EVENT_TX_REQUEST; // Tipo: Pedido de Envio
+    memcpy(evt.tx_req.dest_mac, target_mac, 6);
+    evt.tx_req.payload = payload_buffer; // Ponteiro para a memória alocada
+    evt.tx_req.len = len;
+
+    // 5. Enviar para a fila da mac_tx_task
+    if (mac_event_queue != NULL)
+    {
+        if (xQueueSend(mac_event_queue, &evt, pdMS_TO_TICKS(3000)))
+        {
+            ESP_LOGI("APP", "Pedido de envio colocado na fila!");
+        }
+        else
+        {
+            ESP_LOGE("APP", "Fila cheia! Envio descartado.");
+            free(payload_buffer); // Se não entrou na fila, nós limpamos aqui para não vazar
+        }
     }
     else
     {
-        time_to_sendo_probe_request--;
+        ESP_LOGE("APP", "Erro: Fila mac_event_queue não inicializada.");
+        free(payload_buffer);
     }
 }
-void mac_send_package(void *pvParameters)
+
+void mac_tx_task(void *pvParam)
 {
+    mac_event_t evt;
+    mac_event_queue = xQueueCreate(20, sizeof(mac_event_t));
+
+    static uint16_t global_seq_num = 0;
+
+    // Buffer Estático para o Hello (Para não dar malloc toda vez)
+    // Tamanho: Header(24) + Vendor(5) + Payload(1) = 30 bytes
+    static uint8_t hello_buffer[32];
+    vendor_action_frame_t *hello_frame = (vendor_action_frame_t *)hello_buffer;
+
+    // Preparação Única do Hello (Zero Copy na execução)
+    memset(hello_buffer, 0, sizeof(hello_buffer));
+
+    // Configura cabeçalhos fixos do Hello
+    hello_frame->mac_header.frame_control.type = 0;     // Mgt
+    hello_frame->mac_header.frame_control.subtype = 13; // Action
+    // Destino Broadcast
+    memset(hello_frame->mac_header.receiver, 0xFF, 6);
+    // BSSID Privado
+    memcpy(hello_frame->mac_header.bssid, bssid_mac_addr, 6);
+    // Source e OUI
+    memcpy(hello_frame->mac_header.transmitter, module_mac_addr, 6);
+    hello_frame->category = 127;
+    memcpy(hello_frame->oui, MY_OUI, 3);
+    hello_frame->oui_type = 0x01;   // Tipo Interno HELLO
+    hello_frame->payload[0] = 0x01; // Payload HELLO
+
+    ESP_LOGI(TAG, "TX Task Unificada (App + Feedback + Hello)");
+
+    // Inicia o Timer pela primeira vez
+    xTimerStart(hello_timer, 0);
+
     while (1)
     {
-        // Aguardar o semáforo ser liberado// Semafaro liberado pelo timer
-        if (xSemaphoreTake(timer_send_mensage_semaphore, portMAX_DELAY) == pdTRUE)
+        // Bloqueia esperando App pedir envio OU Hardware confirmar
+        if (xQueueReceive(mac_event_queue, &evt, portMAX_DELAY))
         {
-            if (!tx)
+            switch (evt.type)
             {
-                ESP_LOGW(TAG, "no transmit function yet");
-                continue;
-            }
-            else
+            // --- CASO 1: ENVIAR NOVO PACOTE ---
+            case EVENT_TX_REQUEST:
             {
-               // send_probe_request(); /// envio de probe request
-                current_connections *connection_aux = list_connections;
-                //  uint8_t quantidade_conexoes = 0;
-                while (connection_aux != NULL)
+                uint16_t my_seq = global_seq_num;
+
+                // IMPORTANTE: build_and_send_frame DEVE gravar 'my_seq' no pacote
+                // para que o hardware consiga ler depois.
+                bool sent = build_and_send_frame(
+                    evt.tx_req.dest_mac,
+                    evt.tx_req.payload,
+                    evt.tx_req.len,
+                    my_seq);
+
+                if (sent)
                 {
-                    // quantidade_conexoes++;
-                    if (connection_aux->wait_time_to_send == 0)
-                    {
-                        uint8_t wait_time_aux;
-                        send_mensage_mac_protocol(connection_aux);
-                        esp_fill_random(&wait_time_aux, 1);
-                        connection_aux->wait_time_to_send = wait_time_aux & wait_time_max_resend_mensage;
-                    }
-                    else
-                    {
-                        connection_aux->wait_time_to_send--;
-                    }
-
-                    if (connection_aux->communication_attempts > max_attempts)
-                    {
-                        connection_aux = remove_conection(&list_connections, &connection_aux);
-                    }
-
-                    if (connection_aux != NULL)
-                    {
-                        connection_aux = connection_aux->next;
-                    }
-                    // if (connection_aux->communication_attempts % 2 == 0)
-                    // {
-                    //     update_wait_time_to_send(connection_aux);
-                    // }
+                    // ESP_LOGI(TAG, "--> Enviando Seq %d...", my_seq);
+                    global_seq_num = (global_seq_num + 1) & 0xFFF;
                 }
-                // ESP_LOGW(TAG, "Quantidade de conexões é %i", quantidade_conexoes);
+                else
+                {
+                    ESP_LOGE(TAG, "Erro ao enviar Seq %d (HW Cheio)", my_seq);
+                }
+
+                // Libera payload da aplicação
+                if (evt.tx_req.payload)
+                    free(evt.tx_req.payload);
+                break;
+            }
+
+            // --- CASO 2: FEEDBACK DO HARDWARE ---
+            case EVENT_TX_COMPLETE:
+            {
+                if (evt.tx_conf.success)
+                {
+                    ESP_LOGI(TAG, "[V] SUCESSO: Seq %d confirmado (ACK)", evt.tx_conf.seq_num);
+                    // AQUI: Estatísticas++, Notificar App, etc.
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "[X] FALHA: Seq %d (Timeout/Sem ACK)", evt.tx_conf.seq_num);
+                    // AQUI: Lógica de reenvio ou remover vizinho
+                }
+                break;
+            }
+            case EVENT_TX_HELLO:
+            {
+                // Atualiza apenas o Sequence Number no buffer estático
+                hello_frame->mac_header.sequence_control.sequence_number = global_seq_num;
+
+                // Envia direto para o hardware (hardware_tx_func)
+                // Usamos a função crua para evitar mallocs desnecessários
+                if (hardware_tx_func)
+                {
+                    // hardware_tx_func(hello_buffer, 30); // 30 bytes fixos
+                    // ESP_LOGI(TAG, "Hello Broadcast Seq %d", global_seq_num);
+                    enviar_teste_unicast();
+                }
+
+                // Incrementa Seq Global
+                global_seq_num = (global_seq_num + 1) & 0xFFF;
+
+                // --- CÁLCULO DE JITTER (IMPORTANTE) ---
+                // Para evitar colisão, o próximo Hello deve ser aleatório.
+                // Intervalo: 1000ms +/- 200ms (800ms a 1200ms)
+                int next_interval_ms = hello_interval_ms + ((esp_random() % 401) - 200);
+
+                // Reprograma o timer para o novo tempo
+                xTimerChangePeriod(hello_timer, pdMS_TO_TICKS(next_interval_ms), 0);
+                break;
+            }
             }
         }
     }
-    //
+}
+
+void hello_timer_callback(TimerHandle_t xTimer)
+{
+    mac_event_t evt;
+    evt.type = EVENT_TX_HELLO;
+    xQueueSend(mac_event_queue, &evt, 0);
+}
+
+void IRAM_ATTR my_tx_done_callback(uint16_t seq, bool success)
+{
+    mac_event_t evt;
+    evt.type = EVENT_TX_COMPLETE;
+    evt.tx_conf.seq_num = seq;
+    evt.tx_conf.success = success;
+
+    // Agora sim, O MAC sabe qual fila usar
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(mac_event_queue, &evt, &xHigherPriorityTaskWoken);
+
+    if (xHigherPriorityTaskWoken)
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+
+void mac_init()
+{
+    // Cria filas e semáforos
+    rx_queue_hw_to_mac = xQueueCreate(10, sizeof(mac_rx_item_t));
+    hello_timer = xTimerCreate("HelloTimer", pdMS_TO_TICKS(1000), pdFALSE, NULL, hello_timer_callback);
+    // Cria as Tasks no Core 1
+
+    hardware_register_tx_callback(my_tx_done_callback);
+    xTaskCreatePinnedToCore(mac_rx_task, "MAC_RX", 4098, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(mac_tx_task, "MAC_TX", 4098, NULL, 4, NULL, 1);
 }
